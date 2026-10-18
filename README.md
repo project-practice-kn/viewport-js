@@ -4,9 +4,10 @@
 
 ## Запуск
 
-Нужны Node.js 24 и npm.
+Нужны Node.js 24 и npm. Если используете nvm, сначала установите нужную версию:
 
 ```sh
+nvm install
 nvm use
 npm ci
 npm run dev
@@ -15,6 +16,8 @@ npm run dev
 Открыть http://localhost:5173. Страница показывает «Viewport — Шаблон SvelteKit запущен».
 
 Для запуска не нужны `.env`, SQLite, S3 и другие сервисы. Аккаунтов, галерей, базы данных и бизнес-логики в шаблоне нет.
+
+Для окружения с локальным S3 нужны также Docker и Docker Compose с доступом к Docker daemon. Порядок запуска агентом описан в [AGENTS.md](AGENTS.md), настройка SeaweedFS — в [docs/deployment.md](docs/deployment.md). Если Node.js 24 уже установлен, команды nvm можно пропустить. Для сборки нативных npm-пакетов могут понадобиться Python 3, make и C++ compiler.
 
 ## Подготовлено
 

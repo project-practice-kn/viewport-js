@@ -8,6 +8,23 @@
 
 Прочитай README.md, docs/architecture.md и tasks/README.md. Перед реализацией задачи прочитай её файл и зависимости. Общение, документация и UI — на русском; идентификаторы и код — на английском.
 
+## Если попросили «подними проект»
+
+1. Проверь Node.js 24, npm и доступ к Docker Compose. При использовании nvm выполни `nvm install && nvm use`; для сборки нативных npm-пакетов могут понадобиться Python 3, make и C++ compiler.
+2. Выполни `npm ci`. Если `.env` отсутствует, скопируй `.env.example`. Недостающие, пустые или примерные `S3_ACCESS_KEY_ID` и `S3_SECRET_ACCESS_KEY` заполни случайными значениями через `node:crypto` без вывода ключей в лог. Остальные существующие настройки сохраняй.
+3. Запусти `docker compose up -d --wait s3`, затем `npm run dev -- --host 127.0.0.1 --port 5173 --strictPort`. Dev-сервер оставь работающим в фоновой сессии.
+4. Проверь HTTP 200 и текст «Шаблон SvelteKit запущен» на `http://localhost:5173`, а также healthy у `s3` через `docker compose ps`. Сообщи адреса и команды остановки. Если порт занят, проверь существующий процесс; чужие процессы не завершай.
+
+Для запуска только страницы достаточно Node.js 24, `npm ci` и `npm run dev`: `.env` и Docker ей не нужны. Если отсутствуют системные зависимости или права Docker, укажи конкретную причину; не объявляй полный запуск успешным.
+
+## Локальное S3
+
+- SeaweedFS mini — сервис `s3` в compose.yaml; bucket создаётся из `S3_BUCKET`, по умолчанию `viewport-local`.
+- С хоста: `S3_ENDPOINT=http://localhost:8333`, `S3_REGION=us-east-1`, `S3_FORCE_PATH_STYLE=true`. Из контейнеров — `http://s3:8333`; адрес для подписанных ссылок должен быть доступен браузеру.
+- Ключи берутся из `.env`; без них Compose не запускается. Приложение пока к S3 не подключено, bucket CORS ещё не настроен.
+- Логи: `docker compose logs s3`; остановка: `docker compose stop s3`. Данные сохраняются в volume `s3-data`; `docker compose down -v` удалит их.
+- Полная инструкция: [docs/deployment.md](docs/deployment.md).
+
 ## Стек
 
 - Node.js 24, npm, SvelteKit 3, Svelte 5, TypeScript 6, Bulma + scoped CSS.
