@@ -1,0 +1,14 @@
+{
+  "extends": "$app/tsconfig",
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "strict": true
+  },
+  "include": ["src", "scripts", "tests", "*.ts", "*.js"],
+  "exclude": ["node_modules", "build"]
+}

@@ -1,0 +1,15 @@
+node_modules/
+.svelte-kit/
+build/
+.env
+.env.*
+!.env.example
+data/
+*.db
+*.db-shm
+*.db-wal
+coverage/
+test-results/
+playwright-report/
+.DS_Store
+*.log
