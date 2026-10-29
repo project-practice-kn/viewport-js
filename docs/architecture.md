@@ -1,6 +1,6 @@
 # Целевая архитектура Viewport
 
-Это план будущей реализации. Сейчас в репозитории только минимальный SvelteKit-шаблон: без авторизации, БД, миграций и бизнес-модулей.
+Архитектура checkpoint MVP реализована для цепочки auth → draft → upload → publish → original. Раздел ZIP описывает будущую реализацию вне checkpoint.
 
 Viewport — учебный MVP передачи фотографий за восемь недель. Один Node.js процесс обслуживает SSR, hydration, формы, HTTP endpoints, работу с SQLite и внешним приватным S3. Масштабирование после MVP вне scope.
 
@@ -31,7 +31,7 @@ Routes не содержат SQL и сложную бизнес-логику. О
 
 ## Данные
 
-SQLite хранит `users`, `sessions`, `accounts`, `verifications`, `galleries`, `photos`, `upload_reservations`. Better Auth будет подключён через явное сопоставление таблиц Drizzle. Drizzle schema и DDL предстоит создать в VP-002; сейчас drizzle/ пуст.
+SQLite хранит `users`, `sessions`, `accounts`, `verifications`, `galleries`, `photos`, `upload_reservations`. Better Auth подключён через явное сопоставление таблиц Drizzle. Схема и SQL/metadata миграций сохранены в репозитории.
 
 - Gallery: `draft | published`; тема `light | dark`; уникальный nullable share token до публикации.
 - Photo: `pending | processing | ready | failed`; nullable preview до обработки; MIME только JPEG/PNG/WebP; размер > 0.
@@ -41,11 +41,11 @@ SQLite хранит `users`, `sessions`, `accounts`, `verifications`, `galleries
 - Обложка проверяется сервисом: ready photo той же галереи. Прямой циклический foreign key cover → photo не вводится.
 - Foreign keys для данных с объектами S3 используют RESTRICT: каскадное удаление не должно молча оставлять объекты. Удаление реализуется сервисом с компенсацией.
 
-## Загрузка и квоты — целевое поведение
+## Загрузка и квоты
 
 1. Авторизованный владелец draft отправляет метаданные партии.
 2. В `BEGIN IMMEDIATE`: проверить доступ/статус, вычислить ready original bytes + активные reservations, атомарно создать pending photos и резервы. Для MVP квота одна на пользователя из env.
-3. После commit выдавать короткоживущие presigned PUT. Ключи генерирует сервер: `users/{userId}/galleries/{galleryId}/originals/{photoId}`.
+3. После commit выдавать короткоживущие presigned PUT во временный uploads/{photoId}. После проверки сервер сохраняет неизменённый оригинал в originals/{photoId}, недоступный для браузерного PUT. Ключи генерирует сервер: `users/{userId}/galleries/{galleryId}/originals/{photoId}`.
 4. Браузер загружает напрямую. Bucket CORS разрешает только нужные origins, методы и заголовки.
 5. Confirm проверяет владельца резерва, срок, HEAD, фактический размер и декодирование Sharp. Content-Type клиента недостаточно.
 6. Ограничить число одновременных загрузок, размер партии, количество ожидающих обработок и декодируемых пикселей. Переполнение возвращает retryable отказ, без бесконечной очереди в памяти.
@@ -71,6 +71,6 @@ Presigned PUT сам по себе не гарантирует размер об
 
 Один контейнер Node 24, SQLite volume, внешний S3, HTTPS на reverse proxy хостинга. Миграции до старта; `/health` проверяет доступность мигрированной SQLite, S3 на старте не требуется. Контейнер запускается пользователем node. Инструкция: [deployment.md](deployment.md).
 
-## Граница текущего каркаса
+## Граница checkpoint
 
-Реализован минимальный SvelteKit dev-сервер; для локальной разработки отдельно запускается SeaweedFS mini из Compose. Auth, SQLite, миграции, галереи, интеграция приложения с S3, загрузки и скачивания находятся в backlog.
+Реализованы SQLite/Better Auth, draft CRUD без удаления, lifecycle, приватный S3, атомарная квота, загрузка/confirm, Sharp, обложка/порядок, повторяемая очистка, SSR публичной галереи и скачивание оригинала. ZIP, удаление готового состава и production deployment остаются в backlog. При ошибке photo становится failed, резерв released; ключи остаются в БД до очистки после TTL. cleanedAt фиксирует успешную очистку, отказ S3 сохраняет возможность повтора. Зависший после рестарта processing очищается по TTL. CLI очистки запускается при остановленном приложении; внутри приложения очистка пропускает активные confirm. Подробности и ограничения: deployment.md и verification.md.

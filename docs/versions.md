@@ -37,7 +37,7 @@
 - `tsconfig.json` расширяет `$app/tsconfig`, types синхронизируются `svelte-kit sync`.
 - `building` импортируется из `$app/env`, `Handle` — из `@sveltejs/kit/hooks`.
 - `paths.origin` задаёт канонический origin при сборке вместо runtime ORIGIN adapter-node. Учесть при будущей настройке auth/deployment; в шаблоне это не подключено.
-- Для будущей интеграции Better Auth: отдельный `@better-auth/drizzle-adapter`, hook `svelteKitHandler` и последний plugin `sveltekitCookies(getRequestEvent)`.
+- Для checkpoint Better Auth подключён через `@better-auth/drizzle-adapter`; auth.handler обслуживает /api/auth, hook заполняет locals, server actions передают Set-Cookie из asResponse. Интеграция проверена на установленных версиях.
 
 ## Известное замечание npm audit
 

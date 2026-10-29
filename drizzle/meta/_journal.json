@@ -1,0 +1,27 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "6",
+      "when": 1793304750381,
+      "tag": "0000_silly_marvel_zombies",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1793304941075,
+      "tag": "0001_foamy_blockbuster",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1793305640095,
+      "tag": "0002_chubby_agent_brand",
+      "breakpoints": true
+    }
+  ]
+}
