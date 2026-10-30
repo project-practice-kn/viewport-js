@@ -179,3 +179,16 @@ test('Sharp: все форматы, EXIF rotation, прозрачность, п�
     delete process.env.MAX_IMAGE_PIXELS;
   }
 });
+
+test('S3: подпись использует публичный endpoint независимо от внутреннего адреса', async () => {
+  process.env.S3_ENDPOINT = 'http://s3:8333';
+  process.env.S3_PUBLIC_ENDPOINT = 'http://localhost:8333';
+  process.env.S3_ACCESS_KEY_ID ||= 'test-access';
+  process.env.S3_SECRET_ACCESS_KEY ||= 'test-secret';
+  const { presignPut, presignGet } = await import('../src/lib/server/storage/index.ts');
+  assert.equal(
+    new URL(await presignPut('test/photo', 'image/png', 60)).origin,
+    'http://localhost:8333',
+  );
+  assert.equal(new URL(await presignGet('test/photo')).origin, 'http://localhost:8333');
+});

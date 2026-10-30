@@ -7,11 +7,10 @@ import {
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { setting } from '../config.ts';
-let client: S3Client | undefined;
-export const s3 = () =>
-  (client ??= new S3Client({
+function createClient(endpoint: string) {
+  return new S3Client({
     region: setting('S3_REGION', 'us-east-1'),
-    endpoint: setting('S3_ENDPOINT'),
+    endpoint,
     forcePathStyle: setting('S3_FORCE_PATH_STYLE', 'true') === 'true',
     credentials: {
       accessKeyId: setting('S3_ACCESS_KEY_ID'),
@@ -19,7 +18,13 @@ export const s3 = () =>
     },
     requestChecksumCalculation: 'WHEN_REQUIRED',
     responseChecksumValidation: 'WHEN_REQUIRED',
-  }));
+  });
+}
+let client: S3Client | undefined;
+let signingClient: S3Client | undefined;
+export const s3 = () => (client ??= createClient(setting('S3_ENDPOINT')));
+const signer = () =>
+  (signingClient ??= createClient(setting('S3_PUBLIC_ENDPOINT', setting('S3_ENDPOINT'))));
 export const bucket = () => setting('S3_BUCKET', 'viewport-local');
 export const put = (key: string, body: Uint8Array, mime: string) =>
   s3().send(new PutObjectCommand({ Bucket: bucket(), Key: key, Body: body, ContentType: mime }));
@@ -42,7 +47,7 @@ export async function read(key: string, expectedSize: number) {
   return Buffer.concat(chunks);
 }
 export const presignPut = (key: string, mime: string, ttl: number) =>
-  getSignedUrl(s3(), new PutObjectCommand({ Bucket: bucket(), Key: key, ContentType: mime }), {
+  getSignedUrl(signer(), new PutObjectCommand({ Bucket: bucket(), Key: key, ContentType: mime }), {
     expiresIn: ttl,
   });
 export function safeFilename(name: string) {
@@ -55,7 +60,7 @@ export function safeFilename(name: string) {
 }
 export const presignGet = (key: string, filename?: string) =>
   getSignedUrl(
-    s3(),
+    signer(),
     new GetObjectCommand({
       Bucket: bucket(),
       Key: key,

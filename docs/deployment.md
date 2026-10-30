@@ -1,50 +1,79 @@
-# Локальный запуск checkpoint
+# Локальный запуск checkpoint в Docker
 
-Нужны Node.js 24 и npm. Сначала `npm ci`, затем `node scripts/setup-env.mjs` и `npm run db:migrate`. Миграции повторяемы и не запускаются внутри HTTP-запросов. `.env`, SQLite/WAL/SHM и `data/` исключены из Git.
+## Первый запуск
 
-`ORIGIN` должен совпадать с адресом браузера: по умолчанию `http://localhost:5173`. В SvelteKit 3 он задаёт `paths.origin` при сборке, а также runtime baseURL Better Auth. После изменения origin пересоберите приложение. Секрет Better Auth — случайный, не короче 32 символов. Существующие значения скрипт настройки сохраняет.
-
-## SeaweedFS через Docker
+Создайте `.env` со случайными секретами, затем поднимите весь проект:
 
 ```sh
-docker compose up -d --wait s3
+node scripts/setup-env.mjs
+docker compose up --build -d --wait
+```
+
+Без установленного Node.js первую команду можно выполнить контейнером:
+
+```sh
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD:/workspace" -w /workspace node:24-bookworm-slim node scripts/setup-env.mjs
+```
+
+Приложение: **http://localhost:5173**. S3: `http://localhost:8333`, bucket приватный. Порты опубликованы только на loopback. Секреты передаются при запуске через `.env`, исключённый из build context; в образ они не копируются. Не публикуйте вывод `docker compose config`/`inspect` с environment.
+
+Приложение ждёт healthy S3, выполняет миграции и настройку bucket/CORS, затем запускает production-сборку. Ошибка подготовки останавливает запуск. `/health` проверяет доступность таблиц мигрированной SQLite; Compose проверяет его раз в пять секунд. Runtime работает пользователем node, не root.
+
+`ORIGIN` по умолчанию `http://localhost:5173` передаётся в build и runtime. После изменения origin пересоберите образ. Не открывайте приложение по другому hostname: CSRF и Better Auth используют канонический origin.
+
+## Адреса S3
+
+Внутри Compose `S3_ENDPOINT=http://s3:8333` используется для HEAD/GET/PUT/DELETE и настройки bucket. `S3_PUBLIC_ENDPOINT=http://localhost:8333` используется отдельным клиентом только для подписи браузерных ссылок. Оба клиента используют одинаковые bucket/region/credentials; подписанный URL не переписывается после подписи. Это позволяет браузеру обращаться к S3 без знания внутреннего Docker DNS.
+
+CORS разрешает только `ORIGIN`, методы PUT/GET/HEAD и Content-Type, открывает ETag. Anonymous GET возвращает 403. GET TTL — 120 секунд, PUT — до 300 секунд.
+
+## Данные, обновление и остановка
+
+SQLite находится в volume `app-data` по пути `/app/data/viewport.db`; SeaweedFS — в `s3-data`. При первоначальном переносе старые данные из `data/viewport.db` и бинарного S3 сохранены в `data/checkpoint-transfer`, импортированы в volumes и проверены по хэшам. Исходные файлы не удаляются.
+
+```sh
+docker compose ps
+docker compose logs --tail=50 app
+docker compose logs --tail=50 s3
+docker compose restart
+docker compose up --build -d --wait
+docker compose down
+```
+
+`down` удаляет контейнеры и сеть, сохраняя volumes. `down -v` удаляет данные. Не запускайте несколько экземпляров приложения с одной SQLite.
+
+Для очистки зависших загрузок после TTL остановите приложение и выполните CLI в одноразовом контейнере:
+
+```sh
+docker compose stop app
+docker compose run --rm --no-deps app node scripts/cleanup.ts
+docker compose up -d --wait app
+```
+
+Очистка идёт порциями по 100 записей; повторите команду при большом хвосте. Отказ DELETE сохраняет ключи для повтора; приложение также чистит по 10 записей перед presign. Ошибка/отмена переводит photo в failed и освобождает квоту; временные ключи удаляются после TTL старого PUT.
+
+## Проверка
+
+```sh
+docker compose --profile tools run --rm smoke
+```
+
+Профиль tools запускает smoke из того же образа с доступом к SQLite volume. На Linux используется host network, чтобы проверять те же `localhost` URL, которыми пользуется браузер. На Docker Desktop для этой команды нужно включить host networking. Smoke создаёт отдельные аккаунты и удаляет только собственные записи/объекты. Unit tests, типы и сборка: `npm test` и `npm run verify`.
+
+## Разработка на хосте
+
+Нужен Node.js 24. Если контейнер app запущен, сначала `docker compose stop app`, чтобы освободить порт и исключить несколько процессов. Затем:
+
+```sh
+npm ci
+npm run db:migrate
 npm run s3:setup
 npm run dev -- --host 127.0.0.1 --port 5173 --strictPort
 ```
 
-`s3:setup` создаёт отсутствующий bucket и задаёт CORS только для `ORIGIN`: PUT/GET/HEAD, Content-Type, ETag. Bucket приватный, anonymous GET должен возвращать 403. Не отключайте S3 credentials. Приложение и браузер используют `S3_ENDPOINT=http://localhost:8333`, region `us-east-1`, path-style.
+При этом используется локальный `DATABASE_PATH` из `.env`, а не Docker volume; это независимая БД. S3 может оставаться контейнерным. Для возврата: остановить dev и `docker compose up -d --wait app`.
 
-```sh
-docker compose ps
-docker compose logs s3
-docker compose stop s3
-```
-
-Данные остаются в volume `s3-data`; `docker compose down -v` удаляет данные. Из контейнера endpoint `http://s3:8333` недоступен браузеру: текущая локальная конфигурация рассчитана на приложение на хосте. Production Compose с SQLite volume, HTTPS и внешним S3 — отдельная VP-029.
-
-## SeaweedFS без Docker
-
-Если daemon недоступен, скачайте официальный `linux_amd64.tar.gz` версии 4.48 из releases `seaweedfs/seaweedfs`, распакуйте `weed` и выполните:
-
-```sh
-SEAWEEDFS_BINARY=/путь/к/weed npm run s3:local
-```
-
-Процесс использует S3-ключи из `.env`, слушает loopback, хранит данные в `data/s3`. В другом терминале: `npm run s3:setup` и `npm run dev`. Остановка — Ctrl+C в его терминале либо `kill -TERM "$(cat data/local-s3.pid)"`. PID-файл создаётся только этим скриптом. Данные бинарного запуска и Docker volume независимы.
-
-В текущей проверочной среде Docker CLI установлен, но daemon не запущен, а `sudo` требует пароль. Поэтому проверка выполнена с настоящим бинарным SeaweedFS 4.48, без имитации S3. Docker healthy здесь не подтверждён.
-
-## Работа сервера и обслуживание
-
-Dev — `npm run dev`, остановка Ctrl+C. Сборка — `npm run build`. Для локального запуска production-сборки: `HOST=127.0.0.1 PORT=5173 npm start` после остановки dev; origin сохраняется тем же. `npm start` загружает локальный `.env` через Node.
-
-```sh
-npm run uploads:cleanup
-```
-
-Очистка идёт порциями по 100 записей в CLI и по 10 перед presign; при большом хвосте повторите CLI. После истечения reservation TTL удаляются временные объекты, а у неготовых фото также оригиналы и превью. Не удаляйте записи вручную: в них ключи для повторного удаления при сбое S3. Отказ DELETE оставляет запись пригодной для повтора. Ошибка/отмена необратимо переводит photo в failed и освобождает квоту; повтор файла создаёт новый photo. Временный объект удаляется после TTL, поскольку старый presigned PUT ещё может быть использован.
-
-Не запускайте несколько экземпляров приложения: ограничитель обработки рассчитан на один процесс. Для очистки зависшего processing после остановки/рестарта дождитесь TTL и выполните CLI. Для исключения гонки с ещё работающей обработкой CLI запускайте после остановки приложения; очистка перед presign сама пропускает текущие обработки.
+Локальный Compose реализован для checkpoint. Публичный HTTPS reverse proxy, внешний домен, backup/restore и финальная VP-029 остаются отдельной работой.
 
 ## Лимиты
 

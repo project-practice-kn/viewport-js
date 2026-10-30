@@ -27,7 +27,7 @@ Routes не содержат SQL и сложную бизнес-логику. О
 
 По уточнению используются последние совместимые стабильные версии. SvelteKit 3 переместил конфигурацию в `vite.config.ts`, заменил `$lib` на subpath import `#lib` и `$app/environment` на `$app/env`; исходная структура `src/lib/server` сохранена. TypeScript 6 — последняя совместимая ветка, хотя npm latest уже 7. Подробности: [versions.md](versions.md).
 
-При будущей реализации `ORIGIN` потребуется передавать в `paths.origin` на этапе build и в Better Auth при runtime. Это следствие API SvelteKit 3; смена домена требует пересборки. Конфигурация не отключает CSRF.
+`ORIGIN` передаётся в `paths.origin` на этапе build и в Better Auth при runtime. Это следствие API SvelteKit 3; смена домена требует пересборки. Конфигурация не отключает CSRF.
 
 ## Данные
 
@@ -69,7 +69,7 @@ Presigned PUT сам по себе не гарантирует размер об
 
 ## Развёртывание
 
-Один контейнер Node 24, SQLite volume, внешний S3, HTTPS на reverse proxy хостинга. Миграции до старта; `/health` проверяет доступность мигрированной SQLite, S3 на старте не требуется. Контейнер запускается пользователем node. Инструкция: [deployment.md](deployment.md).
+Локально Compose запускает контейнер Node 24 и приватный SeaweedFS с отдельными SQLite/S3 volumes. Внутренний endpoint S3 отделён от публичного адреса подписанных ссылок. Внешний S3 и HTTPS reverse proxy хостинга относятся к финальному deployment. Миграции до старта; `/health` проверяет доступность мигрированной SQLite, S3 на старте не требуется. Контейнер запускается пользователем node. Инструкция: [deployment.md](deployment.md).
 
 ## Граница checkpoint
 

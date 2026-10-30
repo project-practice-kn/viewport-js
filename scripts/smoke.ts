@@ -132,6 +132,12 @@ async function upload(id: string, cookie: string, data: Uint8Array, name: string
   return signed.id;
 }
 try {
+  const loginPage = await req('/login');
+  assert.equal(
+    loginPage.headers.get('referrer-policy'),
+    'same-origin',
+    'Политика не ломает Origin обычных HTML-форм',
+  );
   assert.equal((await req('/dashboard')).status, 303);
   assert.equal((await req('/api/uploads/presign', '', { galleryId: 'x', files: [] })).status, 401);
   const a = await register(),

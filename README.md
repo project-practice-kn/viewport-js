@@ -4,28 +4,31 @@
 
 Стек: Node.js 24, SvelteKit 3 / Svelte 5, TypeScript 6, Bulma + CSS, SQLite / Drizzle, Better Auth, приватный S3 и Sharp. Один серверный процесс; отдельного worker нет.
 
-## Запуск
+## Запуск в Docker
 
 ```sh
-nvm install
-nvm use
-npm ci
 node scripts/setup-env.mjs
-npm run db:migrate
-docker compose up -d --wait s3
-npm run s3:setup
-npm run dev -- --host 127.0.0.1 --port 5173 --strictPort
+docker compose up --build -d --wait
 ```
 
-Открыть **http://localhost:5173**. Скрипт настройки создаёт `.env` и случайные auth/S3 секреты без вывода в лог, сохраняя существующие настройки. Для npm native modules могут потребоваться Python 3, make, C++ compiler. Нужны доступ к Docker daemon и свободные порты 5173/8333.
+Открыть **http://localhost:5173**. В Docker работают production-приложение и приватный SeaweedFS 4.48. Миграции SQLite, создание bucket и CORS выполняются автоматически перед стартом. Оба сервиса имеют healthcheck; приложение работает пользователем node. Данные сохраняются в volumes `app-data` и `s3-data` после перезапуска и пересоздания контейнеров.
 
-Если Docker недоступен, можно запустить официальный бинарный SeaweedFS 4.48 на loopback:
+Node.js на хосте нужен только для однократной генерации `.env`; вариант этой команды тоже через Docker есть в [инструкции запуска](docs/deployment.md). Существующие настройки и секреты скрипт сохраняет, новые секреты не выводит в лог.
 
 ```sh
-SEAWEEDFS_BINARY=/путь/к/weed npm run s3:local
+docker compose ps
+docker compose logs --tail=50 app
+docker compose restart
+docker compose down
 ```
 
-Далее в другом терминале выполнить `npm run s3:setup` и `npm run dev`. Данные бинарного S3 сохраняются в `data/s3`, SQLite — в `data/viewport.db`. Полная инструкция и остановка: [docs/deployment.md](docs/deployment.md).
+`down` сохраняет данные; `down -v` удаляет volumes. Полный интеграционный сценарий в Docker на Linux:
+
+```sh
+docker compose --profile tools run --rm smoke
+```
+
+Для разработки на хосте доступны npm-команды; настройка описана в [docs/deployment.md](docs/deployment.md).
 
 ## Демонстрация checkpoint
 
