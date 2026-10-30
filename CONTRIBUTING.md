@@ -1,6 +1,6 @@
 # Разработка
 
-Репозиторий содержит checkpoint MVP. Запуск с SQLite и приватным S3 описан в README.md и docs/deployment.md.
+Запуск с SQLite и приватным S3 описан в README.md и docs/deployment.md.
 
 ## Порядок работы
 
@@ -22,4 +22,4 @@
 - Для SQLite сохранены миграции; для S3/Sharp/ZIP проверен реальный сценарий и очищены временные данные.
 - Документация и статусы соответствуют реализации; секретов и локальных данных в Git нет.
 
-Проверки: npm test, npm run verify и npm run test:smoke при работающих приложении и S3. Протокол и ограничения — docs/verification.md.
+Проверки: npm test, npm run verify и npm run test:smoke при работающих приложении и S3. Назначение проверок — docs/verification.md. Фактические результаты записывайте в задаче.

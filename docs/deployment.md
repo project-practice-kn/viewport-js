@@ -1,4 +1,4 @@
-# Локальный запуск checkpoint в Docker
+# Запуск и обслуживание
 
 ## Первый запуск
 
@@ -29,7 +29,7 @@ CORS разрешает только `ORIGIN`, методы PUT/GET/HEAD и Cont
 
 ## Данные, обновление и остановка
 
-SQLite находится в volume `app-data` по пути `/app/data/viewport.db`; SeaweedFS — в `s3-data`. При первоначальном переносе старые данные из `data/viewport.db` и бинарного S3 сохранены в `data/checkpoint-transfer`, импортированы в volumes и проверены по хэшам. Исходные файлы не удаляются.
+SQLite находится в volume `app-data` по пути `/app/data/viewport.db`; SeaweedFS — в `s3-data`.
 
 ```sh
 docker compose ps
@@ -73,7 +73,7 @@ npm run dev -- --host 127.0.0.1 --port 5173 --strictPort
 
 При этом используется локальный `DATABASE_PATH` из `.env`, а не Docker volume; это независимая БД. S3 может оставаться контейнерным. Для возврата: остановить dev и `docker compose up -d --wait app`.
 
-Локальный Compose реализован для checkpoint. Публичный HTTPS reverse proxy, внешний домен, backup/restore и финальная VP-029 остаются отдельной работой.
+Compose публикует сервисы только на loopback. Настройка публичного HTTPS и внешнего домена описана в [VP-029](../tasks/issues/VP-029.md), резервное копирование — в [VP-031](../tasks/issues/VP-031.md).
 
 ## Лимиты
 

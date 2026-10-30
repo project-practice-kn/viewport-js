@@ -1,3 +1,3 @@
-# auth
+# Авторизация
 
-Серверная часть checkpoint MVP. Реализация auth/db/galleries/photos/storage находится в соседних модулях; публикация и выдача оригиналов — в galleries/index.ts. Архитектура и ограничения описаны в docs/architecture.md и docs/deployment.md в корне репозитория. ZIP остаётся в backlog.
+В `index.ts` создаётся Better Auth с Drizzle adapter, email/password и cookie-сессиями. `requireUser` перенаправляет неавторизованного пользователя на вход. Hook и каждый защищённый маршрут проверяют доступ отдельно.

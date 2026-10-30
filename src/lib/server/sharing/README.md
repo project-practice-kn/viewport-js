@@ -1,3 +1,3 @@
-# sharing
+# Публичный доступ
 
-Серверная часть checkpoint MVP. Реализация auth/db/galleries/photos/storage находится в соседних модулях; публикация и выдача оригиналов — в galleries/index.ts. Архитектура и ограничения описаны в docs/architecture.md и docs/deployment.md в корне репозитория. ZIP остаётся в backlog.
+Проверки публикации и токена находятся в [galleries/index.ts](../galleries/index.ts). Публичный маршрут — [g/[token]](../../../routes/g/[token]/). Отдельного сервиса в этом каталоге нет; при выделении сохраняйте единую проверку token/published/ready.

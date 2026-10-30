@@ -1,3 +1,3 @@
-# storage
+# S3
 
-Серверная часть checkpoint MVP. Реализация auth/db/galleries/photos/storage находится в соседних модулях; публикация и выдача оригиналов — в galleries/index.ts. Архитектура и ограничения описаны в docs/architecture.md и docs/deployment.md в корне репозитория. ZIP остаётся в backlog.
+`index.ts` предоставляет ленивый клиент для put/head/read/delete и отдельный клиент для подписи URL. Серверные операции используют S3_ENDPOINT, подпись — S3_PUBLIC_ENDPOINT с fallback на S3_ENDPOINT. Ключи генерируют серверные сервисы, имена скачивания очищаются через safeFilename.

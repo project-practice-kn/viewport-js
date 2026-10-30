@@ -1,3 +1,3 @@
-# db
+# SQLite и Drizzle
 
-Серверная часть checkpoint MVP. Реализация auth/db/galleries/photos/storage находится в соседних модулях; публикация и выдача оригиналов — в galleries/index.ts. Архитектура и ограничения описаны в docs/architecture.md и docs/deployment.md в корне репозитория. ZIP остаётся в backlog.
+В `schema.ts` описаны таблицы и ограничения. `index.ts` открывает SQLite лениво с WAL/FK/busy timeout и предоставляет `atomic` для BEGIN IMMEDIATE. Миграции находятся в [drizzle/](../../../../drizzle/) и запускаются через `scripts/migrate.ts` до HTTP-сервера.
