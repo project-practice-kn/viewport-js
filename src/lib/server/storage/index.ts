@@ -46,10 +46,15 @@ export async function read(key: string, expectedSize: number) {
   if (size !== expectedSize) throw new Error('Неполный оригинал');
   return Buffer.concat(chunks);
 }
-export const presignPut = (key: string, mime: string, ttl: number) =>
-  getSignedUrl(signer(), new PutObjectCommand({ Bucket: bucket(), Key: key, ContentType: mime }), {
-    expiresIn: ttl,
-  });
+export const presignPut = (key: string, mime: string, size: number, ttl: number) =>
+  getSignedUrl(
+    signer(),
+    new PutObjectCommand({ Bucket: bucket(), Key: key, ContentType: mime, ContentLength: size }),
+    {
+      expiresIn: ttl,
+      signableHeaders: new Set(['content-length', 'content-type']),
+    },
+  );
 export function safeFilename(name: string) {
   return (
     name

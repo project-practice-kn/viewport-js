@@ -51,6 +51,7 @@ async function register() {
     email: `smoke-${randomUUID()}@example.test`,
     name: 'Проверка',
     password,
+    inviteCode: process.env.REGISTRATION_INVITE_CODE,
   });
   assert.equal(response.status, 200, 'Регистрация');
   const result = await response.json();
@@ -94,6 +95,25 @@ async function upload(id: string, cookie: string, data: Uint8Array, name: string
   });
   assert.ok(preflight.ok);
   assert.equal(preflight.headers.get('access-control-allow-origin'), origin, 'CORS origin');
+  for (const size of [data.length - 1, data.length + 1]) {
+    const rejected = await fetch(signed.url, {
+      method: 'PUT',
+      headers: signed.requiredHeaders,
+      body: Buffer.alloc(size),
+    });
+    assert.equal(rejected.status, 403, 'S3 отклоняет изменение подписанного размера');
+    await rejected.arrayBuffer();
+  }
+  const uploadKey = db().select().from(photos).where(eq(photos.id, signed.id)).get()!.uploadKey;
+  await assert.rejects(
+    () => head(uploadKey),
+    (error: unknown) =>
+      !!error &&
+      typeof error === 'object' &&
+      '$metadata' in error &&
+      (error.$metadata as { httpStatusCode?: number }).httpStatusCode === 404,
+    'Отказ PUT не создаёт объект',
+  );
   const put = await fetch(signed.url, {
     method: 'PUT',
     headers: signed.requiredHeaders,
@@ -125,7 +145,7 @@ async function upload(id: string, cookie: string, data: Uint8Array, name: string
       await fetch(signed.url, {
         method: 'PUT',
         headers: signed.requiredHeaders,
-        body: Buffer.from('replacement'),
+        body: Buffer.alloc(data.length, 42),
       })
     ).ok,
   );
@@ -183,7 +203,7 @@ try {
   // Two independent HTTP requests compete for the last 100 bytes in real SQLite.
   const quotaGallery = await create(b.cookie, 'Гонка квоты');
   const held = await reserve(quotaGallery, b.cookie, Buffer.alloc(1), 'hold.png', 'image/png');
-  const quota = Number(process.env.USER_STORAGE_QUOTA_BYTES || 10737418240);
+  const quota = Number(process.env.USER_STORAGE_QUOTA_BYTES || 5368709120);
   db()
     .$client.prepare('update upload_reservations set size=? where photo_id=?')
     .run(quota - 100, held.id);
@@ -332,8 +352,51 @@ try {
     .map((v) => v.split(';')[0])
     .join('; ');
   assert.equal((await req('/dashboard', restoredCookie)).status, 200);
+  const invitedEmail = `invite-${randomUUID()}@example.test`;
+  const deniedRegistration = await req(
+    '/login',
+    '',
+    new URLSearchParams({
+      mode: 'register',
+      name: 'Без приглашения',
+      email: invitedEmail,
+      password,
+      inviteCode: 'wrong-invite',
+    }),
+  );
+  assert.equal(deniedRegistration.status, 403, 'HTML-регистрация требует invite');
+  assert.ok(
+    !db().select().from(user).where(eq(user.email, invitedEmail)).get(),
+    'Отказ не создаёт аккаунт',
+  );
+  let limited = false;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const response = await fetch(new URL('/login', origin), {
+      method: 'POST',
+      headers: {
+        Origin: origin,
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'X-Forwarded-For': `192.0.2.${attempt + 1}`,
+        'x-viewport-client-ip': `192.0.2.${attempt + 20}`,
+      },
+      body: new URLSearchParams({ email: a.email, password: 'wrong-password', mode: 'login' }),
+    });
+    if (response.status === 429) {
+      assert.ok(Number(response.headers.get('retry-after')) > 0);
+      limited = true;
+      break;
+    }
+    assert.equal(response.status, 400);
+  }
+  assert.ok(limited, 'HTML-вход ограничен, заголовки IP не обходят rate limit');
+  assert.equal(
+    (await req('/api/auth/sign-in/email', '', { email: a.email, password: 'wrong-password' }))
+      .status,
+    429,
+    'API делит лимитер с HTML-формой',
+  );
   console.log(
-    'Smoke: auth → галерея → S3 PUT → Sharp → публикация → оригиналы JPEG/PNG/WebP; права, повторы, CORS, приватность, hash, unpublish, cleanup — OK.',
+    'Smoke: invite, общий rate limit HTML/API, S3 ограничивает размер PUT; auth → галерея → Sharp → публикация → оригиналы JPEG/PNG/WebP; права, повторы, CORS, приватность, hash, unpublish, cleanup — OK.',
   );
 } finally {
   // Delete only test owners and their server-generated keys; never touch demonstration data.

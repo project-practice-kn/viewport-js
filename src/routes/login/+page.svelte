@@ -109,6 +109,19 @@
         </div>
       </div>
       {#if register}<p id="password-hint" class="muted">От 10 до 128 символов</p>{/if}
+      {#if register}<label
+          >Код приглашения<input
+            name="inviteCode"
+            type="password"
+            autocomplete="off"
+            autocapitalize="none"
+            spellcheck="false"
+            maxlength="256"
+            required
+            aria-describedby="invite-hint"
+          /></label
+        >
+        <p id="invite-hint" class="muted">Для регистрации нужен код от организатора демо.</p>{/if}
       <input type="hidden" name="mode" value={register ? 'register' : 'login'} />
       <button class="primary" disabled={submitting}
         >{submitting

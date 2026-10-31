@@ -24,7 +24,7 @@ export function usage(userId: string) {
     .from(reservations)
     .where(and(eq(reservations.userId, userId), eq(reservations.status, 'reserved')))
     .get()!.total;
-  return { used, reserved, quota: limit('USER_STORAGE_QUOTA_BYTES', 10737418240) };
+  return { used, reserved, quota: limit('USER_STORAGE_QUOTA_BYTES', 5368709120) };
 }
 export function reserve(userId: string, galleryId: string, files: FileMetadata[]) {
   if (
@@ -42,9 +42,9 @@ export function reserve(userId: string, galleryId: string, files: FileMetadata[]
       !mimeTypes.includes(f.type) ||
       !Number.isSafeInteger(f.size) ||
       f.size <= 0 ||
-      f.size > limit('MAX_FILE_SIZE_BYTES', 26214400)
+      f.size > limit('MAX_FILE_SIZE_BYTES', 10485760)
     )
-      error(400, 'Допустимы JPEG, PNG и WebP до 25 МБ с непустым именем');
+      error(400, 'Допустимы JPEG, PNG и WebP до 10 МиБ с непустым именем');
   }
   return atomic(() => {
     owned(userId, galleryId, true);
@@ -107,6 +107,7 @@ export async function presign(userId: string, galleryId: string, files: FileMeta
         url: await storage.presignPut(
           p.uploadKey,
           p.mime,
+          p.size,
           Math.min(300, Math.floor((p.expiresAt.getTime() - Date.now()) / 1000)),
         ),
         requiredHeaders: { 'Content-Type': p.mime },

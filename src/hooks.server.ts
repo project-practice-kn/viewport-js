@@ -1,10 +1,11 @@
 import type { Handle } from '@sveltejs/kit/hooks';
 import { building } from '$app/env';
-import { auth } from '#lib/server/auth/index.ts';
+import { auth, handleAuthRequest } from '#lib/server/auth/index.ts';
 export const handle: Handle = async ({ event, resolve }) => {
   event.locals.user = null;
   if (!building) {
-    if (event.url.pathname.startsWith('/api/auth/')) return auth().handler(event.request);
+    if (event.url.pathname.startsWith('/api/auth/'))
+      return securityHeaders(await handleAuthRequest(event.request, event.getClientAddress()));
     const session = await auth().api.getSession({ headers: event.request.headers });
     if (session) event.locals.user = { id: session.user.id, name: session.user.name };
     if (
@@ -15,12 +16,15 @@ export const handle: Handle = async ({ event, resolve }) => {
       return new Response('Недопустимый источник запроса', { status: 403 });
     }
   }
-  const response = await resolve(event);
+  return securityHeaders(await resolve(event));
+};
+
+function securityHeaders(response: Response) {
   response.headers.set('Cache-Control', 'private, no-store');
   response.headers.set('Referrer-Policy', 'same-origin');
   response.headers.set('X-Content-Type-Options', 'nosniff');
   return response;
-};
+}
 
 export const handleError: import('@sveltejs/kit/hooks').HandleServerError = ({ kind }) =>
   kind === 'unknown' ? { message: 'Внутренняя ошибка сервера' } : undefined;

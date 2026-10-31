@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
 import sharp from 'sharp';
 import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
 const folder = mkdtempSync(join(tmpdir(), 'viewport-test-'));
@@ -187,8 +188,162 @@ test('S3: подпись использует публичный endpoint нез
   process.env.S3_SECRET_ACCESS_KEY ||= 'test-secret';
   const { presignPut, presignGet } = await import('../src/lib/server/storage/index.ts');
   assert.equal(
-    new URL(await presignPut('test/photo', 'image/png', 60)).origin,
+    new URL(await presignPut('test/photo', 'image/png', 123, 60)).origin,
     'http://localhost:8333',
   );
   assert.equal(new URL(await presignGet('test/photo')).origin, 'http://localhost:8333');
+  const url = new URL(await presignPut('test/photo', 'image/png', 123, 60));
+  assert.ok(url.searchParams.get('X-Amz-SignedHeaders')?.split(';').includes('content-length'));
+  assert.ok(url.searchParams.get('X-Amz-SignedHeaders')?.split(';').includes('content-type'));
+});
+
+test('Лимиты по умолчанию: 10 МиБ на файл, 5 ГиБ на пользователя', () => {
+  const quota = process.env.USER_STORAGE_QUOTA_BYTES;
+  const maxFile = process.env.MAX_FILE_SIZE_BYTES;
+  delete process.env.USER_STORAGE_QUOTA_BYTES;
+  delete process.env.MAX_FILE_SIZE_BYTES;
+  try {
+    assert.equal(uploads.usage('other').quota, 5 * 1024 ** 3);
+    const id = service.create('other', form('Границы размера'));
+    assert.throws(
+      () =>
+        uploads.reserve('other', id, [
+          { name: 'large.png', size: 10 * 1024 ** 2 + 1, type: 'image/png' },
+        ]),
+      httpError(400),
+    );
+    const [photo] = uploads.reserve('other', id, [
+      { name: 'exact.png', size: 10 * 1024 ** 2, type: 'image/png' },
+    ]);
+    uploads.cancel('other', photo.id);
+  } finally {
+    if (quota === undefined) delete process.env.USER_STORAGE_QUOTA_BYTES;
+    else process.env.USER_STORAGE_QUOTA_BYTES = quota;
+    if (maxFile === undefined) delete process.env.MAX_FILE_SIZE_BYTES;
+    else process.env.MAX_FILE_SIZE_BYTES = maxFile;
+  }
+});
+
+test('Invite: неверный/отсутствующий код и пустая конфигурация закрывают регистрацию', async () => {
+  const { assertInviteCode } = await import('../src/lib/server/auth/invite.ts');
+  const original = process.env.REGISTRATION_INVITE_CODE;
+  try {
+    process.env.REGISTRATION_INVITE_CODE = randomUUID();
+    assert.doesNotThrow(() => assertInviteCode(process.env.REGISTRATION_INVITE_CODE));
+    for (const value of [undefined, null, '', 'wrong', {}, ['wrong']])
+      assert.throws(
+        () => assertInviteCode(value),
+        (error: unknown) =>
+          !!error && typeof error === 'object' && 'statusCode' in error && error.statusCode === 403,
+      );
+    delete process.env.REGISTRATION_INVITE_CODE;
+    assert.throws(
+      () => assertInviteCode('anything'),
+      (error: unknown) =>
+        !!error && typeof error === 'object' && 'statusCode' in error && error.statusCode === 503,
+    );
+    process.env.REGISTRATION_INVITE_CODE = 'replace-with-a-random-invite-code';
+    assert.throws(() => assertInviteCode('replace-with-a-random-invite-code'));
+  } finally {
+    if (original === undefined) delete process.env.REGISTRATION_INVITE_CODE;
+    else process.env.REGISTRATION_INVITE_CODE = original;
+  }
+});
+
+test('Auth: invite нельзя обойти через API, лимитер общий для API и HTML-формы, IP не подменяется', async () => {
+  const { handleAuthRequest } = await import('../src/lib/server/auth/index.ts');
+  const { actions } = await import('../src/routes/login/+page.server.ts');
+  const { origin } = await import('../src/lib/server/config.ts');
+  const previous = process.env.REGISTRATION_INVITE_CODE;
+  const inviteCode = randomUUID();
+  const email = `auth-${randomUUID()}@example.test`;
+  const password = randomUUID() + 'Aa1!';
+  const fields = { name: 'Проверка', email, password };
+  const request = (path: string, body: unknown) =>
+    new Request(new URL(path, origin()), {
+      method: 'POST',
+      headers: {
+        Origin: origin(),
+        'Content-Type': 'application/json',
+        'X-Forwarded-For': randomUUID(),
+        'x-viewport-client-ip': '192.0.2.250',
+      },
+      body: JSON.stringify(body),
+    });
+  try {
+    process.env.REGISTRATION_INVITE_CODE = inviteCode;
+    for (const [i, code] of [undefined, 'wrong'].entries()) {
+      const response = await handleAuthRequest(
+        request('/api/auth/sign-up/email', { ...fields, inviteCode: code }),
+        `192.0.2.${10 + i}`,
+      );
+      assert.equal(response.status, 403);
+      assert.equal(
+        (
+          database.$client.prepare('select count(*) as n from users where email=?').get(email) as {
+            n: number;
+          }
+        ).n,
+        0,
+      );
+    }
+    delete process.env.REGISTRATION_INVITE_CODE;
+    assert.equal(
+      (
+        await handleAuthRequest(
+          request('/api/auth/sign-up/email', { ...fields, inviteCode }),
+          '192.0.2.12',
+        )
+      ).status,
+      503,
+    );
+    process.env.REGISTRATION_INVITE_CODE = inviteCode;
+    const registered = await handleAuthRequest(
+      request('/api/auth/sign-up/email', { ...fields, inviteCode }),
+      '192.0.2.13',
+    );
+    assert.equal(registered.status, 200);
+    assert.ok(!JSON.stringify(await registered.json()).includes(inviteCode));
+
+    const responseHeaders: Record<string, string> = {};
+    const formRequest = () =>
+      actions.default({
+        request: new Request(new URL('/login', origin()), {
+          method: 'POST',
+          headers: {
+            Origin: origin(),
+            'x-viewport-client-ip': randomUUID(),
+            'X-Forwarded-For': randomUUID(),
+          },
+          body: new URLSearchParams({ email, password: 'wrong-password', mode: 'login' }),
+        }),
+        getClientAddress: () => '192.0.2.200',
+        setHeaders: (headers: Record<string, string>) => Object.assign(responseHeaders, headers),
+        cookies: { set() {} },
+      } as unknown as Parameters<typeof actions.default>[0]);
+    assert.equal((await formRequest())?.status, 400);
+    assert.equal(
+      (
+        await handleAuthRequest(
+          request('/api/auth/sign-in/email', { email, password: 'wrong-password' }),
+          '192.0.2.200',
+        )
+      ).status,
+      401,
+    );
+    assert.equal((await formRequest())?.status, 400);
+    const blocked = await handleAuthRequest(
+      request('/api/auth/sign-in/email', { email, password: 'wrong-password' }),
+      '192.0.2.200',
+    );
+    assert.equal(blocked.status, 429);
+    assert.ok(Number(blocked.headers.get('retry-after')) > 0);
+    const formBlocked = await formRequest();
+    assert.equal(formBlocked?.status, 429);
+    assert.ok(Number(responseHeaders['Retry-After']) > 0);
+    assert.ok(!JSON.stringify(formBlocked).includes(password));
+  } finally {
+    if (previous === undefined) delete process.env.REGISTRATION_INVITE_CODE;
+    else process.env.REGISTRATION_INVITE_CODE = previous;
+  }
 });

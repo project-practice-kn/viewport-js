@@ -152,10 +152,10 @@
         (f) =>
           !['image/jpeg', 'image/png', 'image/webp'].includes(f.type) ||
           f.size <= 0 ||
-          f.size > 26214400,
+          f.size > 10485760,
       )
     ) {
-      message = 'Выберите непустые файлы JPEG, PNG или WebP размером до 25 МиБ каждый';
+      message = 'Выберите непустые файлы JPEG, PNG или WebP размером до 10 МиБ каждый';
       return;
     }
     message = '';
@@ -221,7 +221,7 @@
       aria-describedby="upload-hint"
     /></label
   >
-  <p id="upload-hint" class="muted">JPEG, PNG, WebP · до 25 МиБ на файл · до 20 файлов за раз</p>
+  <p id="upload-hint" class="muted">JPEG, PNG, WebP · до 10 МиБ на файл · до 20 файлов за раз</p>
   <noscript><p>Для прямой загрузки файлов в хранилище включите JavaScript.</p></noscript>
   {#if message}<p role="alert" class="feedback error">{message}</p>{/if}
   <p class="upload-summary" role="status">{summary}</p>
