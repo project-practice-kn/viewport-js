@@ -1,6 +1,12 @@
 <script lang="ts">
-  import { invalidateAll } from '$app/navigation';
-  let { galleryId }: { galleryId: string } = $props();
+  import { beforeNavigate, invalidateAll } from '$app/navigation';
+  import { onDestroy, onMount } from 'svelte';
+  import { formatBytes } from '#lib/format.ts';
+  let {
+    galleryId,
+    busy = $bindable(false),
+    disabled = false,
+  }: { galleryId: string; busy?: boolean; disabled?: boolean } = $props();
   type Item = {
     file: File;
     status: string;
@@ -13,15 +19,44 @@
     cancelled?: boolean;
   };
   let items: Item[] = $state([]),
-    busy = $state(false),
     message = $state('');
+  let mounted = $state(false);
+  let disposed = false;
+  let completed = $derived(items.filter((item) => item.done).length);
+  let failed = $derived(items.filter((item) => item.failed).length);
+  let summary = $derived(
+    items.length
+      ? `${busy ? 'Загружаем' : 'Загрузка завершена'}: готово ${completed} из ${items.length}${failed ? ` · не загружено: ${failed}` : ''}`
+      : '',
+  );
+  onMount(() => {
+    mounted = true;
+  });
+  onDestroy(() => {
+    disposed = true;
+    for (const item of items) {
+      item.cancelled = true;
+      item.xhr?.abort();
+    }
+  });
+  beforeNavigate(({ cancel, willUnload, from, to }) => {
+    if (!busy) return;
+    if (to?.url.pathname === from?.url.pathname && to?.url.search === from?.url.search) return;
+    if (willUnload || !window.confirm('Загрузка ещё идёт. Покинуть страницу и прервать загрузку?'))
+      cancel();
+  });
   async function api(operation: string, body: unknown) {
     const response = await fetch(`/api/uploads/${operation}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
-    const result = await response.json();
+    let result;
+    try {
+      result = await response.json();
+    } catch {
+      throw new Error('Сервер недоступен. Повторите попытку позже');
+    }
     if (!response.ok) throw new Error(result.message || 'Не удалось выполнить запрос');
     return result;
   }
@@ -34,18 +69,27 @@
       xhr.upload.onprogress = (e) => {
         if (e.lengthComputable) item.progress = Math.round((e.loaded / e.total) * 100);
       };
-      xhr.onload = () =>
+      xhr.onload = () => {
+        item.xhr = undefined;
         xhr.status >= 200 && xhr.status < 300
           ? resolve()
           : reject(new Error('Ошибка передачи файла'));
-      xhr.onerror = () => reject(new Error('Нет соединения. Повторите загрузку'));
-      xhr.onabort = () => reject(new Error('Загрузка отменена'));
+      };
+      xhr.onerror = () => {
+        item.xhr = undefined;
+        reject(new Error('Нет соединения. Повторите загрузку'));
+      };
+      xhr.onabort = () => {
+        item.xhr = undefined;
+        reject(new Error('Загрузка отменена'));
+      };
       xhr.send(item.file);
     });
   }
   async function run(item: Item) {
     item.failed = false;
     item.cancelled = false;
+    if (!item.uploaded) item.progress = 0;
     try {
       if (!item.id) {
         item.status = 'Подготовка';
@@ -95,6 +139,7 @@
   }
   async function choose(event: Event) {
     const input = event.target as HTMLInputElement;
+    if (busy || disabled) return;
     if (!input.files?.length) return;
     const files = [...input.files];
     input.value = '';
@@ -110,7 +155,7 @@
           f.size > 26214400,
       )
     ) {
-      message = 'Допустимы только JPEG, PNG и WebP до 25 МБ';
+      message = 'Выберите непустые файлы JPEG, PNG или WebP размером до 25 МиБ каждый';
       return;
     }
     message = '';
@@ -125,47 +170,84 @@
     }));
     let next = 0;
     async function worker() {
-      while (next < items.length) await run(items[next++]);
+      while (next < items.length) {
+        const item = items[next++];
+        if (!item.cancelled) await run(item);
+      }
     }
-    await Promise.all([worker(), worker()]);
-    busy = false;
-    await invalidateAll();
+    try {
+      await Promise.all([worker(), worker()]);
+      await refresh();
+    } finally {
+      busy = false;
+    }
   }
   async function retry(item: Item) {
+    if (busy || disabled) return;
     busy = true;
-    await run(item);
-    busy = false;
-    await invalidateAll();
+    try {
+      await run(item);
+      await refresh();
+    } finally {
+      busy = false;
+    }
+  }
+  async function refresh() {
+    if (disposed) return;
+    try {
+      await invalidateAll();
+    } catch {
+      message =
+        'Не удалось обновить галерею. Обновите страницу, чтобы увидеть принятые фотографии.';
+    }
+  }
+  function cancel(item: Item) {
+    item.cancelled = true;
+    item.failed = true;
+    item.status = 'Загрузка отменена';
+    item.xhr?.abort();
   }
 </script>
 
-<section class="upload-area">
+<section class="upload-area" aria-label="Загрузка фотографий">
   <p class="eyebrow">ДОБАВИТЬ ФОТОГРАФИИ</p>
-  <label class="file-label"
-    >Выберите снимки<input
+  <label class="upload-picker"
+    ><span>Выбрать фотографии</span><input
       type="file"
       accept="image/jpeg,image/png,image/webp"
       multiple
       onchange={choose}
-      disabled={busy}
+      disabled={!mounted || busy || disabled}
+      aria-describedby="upload-hint"
     /></label
   >
-  <p class="muted">JPEG, PNG, WebP · до 25 МБ · до 20 файлов за раз</p>
+  <p id="upload-hint" class="muted">JPEG, PNG, WebP · до 25 МиБ на файл · до 20 файлов за раз</p>
   <noscript><p>Для прямой загрузки файлов в хранилище включите JavaScript.</p></noscript>
   {#if message}<p role="alert" class="feedback error">{message}</p>{/if}
-  <ul class="upload-list" aria-live="polite">
-    {#each items as item}<li>
-        <strong>{item.file.name}</strong><span>{item.status} · {item.progress}%</span><progress
-          max="100"
-          value={item.progress}
-        ></progress>{#if item.failed && !busy}<button type="button" onclick={() => retry(item)}
-            >Повторить</button
-          >{/if}{#if item.xhr}<button
+  <p class="upload-summary" role="status">{summary}</p>
+  <ul class="upload-list">
+    {#each items as item (item)}<li class:upload-failed={item.failed}>
+        <div class="upload-file">
+          <strong>{item.file.name}</strong><span class="muted">{formatBytes(item.file.size)}</span>
+        </div>
+        <span
+          >{item.status}{#if item.status === 'Передача'}
+            · {item.progress}%{/if}</span
+        >
+        {#if !item.done && !item.failed}<progress
+            max="100"
+            aria-label={`Загрузка ${item.file.name}`}
+            value={item.status === 'Передача' ? item.progress : undefined}
+          ></progress>{/if}
+        {#if item.failed && !busy}<button
             type="button"
-            onclick={() => {
-              item.cancelled = true;
-              item.xhr?.abort();
-            }}>Отменить</button
+            {disabled}
+            aria-label={`Повторить загрузку ${item.file.name}`}
+            onclick={() => retry(item)}>Повторить загрузку</button
+          >{/if}{#if !item.done && !item.failed && !item.uploaded}<button
+            type="button"
+            aria-label={`Отменить загрузку ${item.file.name}`}
+            onclick={() => cancel(item)}>Отменить</button
           >{/if}
       </li>{/each}
   </ul>

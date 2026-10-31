@@ -1,16 +1,18 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { enhance } from '$app/forms';
   import type { PageProps } from './$types';
   let { data, form }: PageProps = $props();
   let register = $derived(data.register || !!form?.register);
   let showPassword = $state(false);
   let mounted = $state(false);
+  let submitting = $state(false);
   onMount(() => {
     mounted = true;
   });
 </script>
 
-<svelte:head><title>Вход · Viewport</title></svelte:head>
+<svelte:head><title>{register ? 'Создать аккаунт' : 'Вход'} · Viewport</title></svelte:head>
 <div class="login-layout">
   <section class="intro">
     <p class="eyebrow">ПРОСТРАНСТВО ДЛЯ ВАШИХ ИСТОРИЙ</p>
@@ -27,7 +29,24 @@
     <p class="eyebrow">КАБИНЕТ ФОТОГРАФА</p>
     <h2>{register ? 'Создать аккаунт' : 'С возвращением'}</h2>
     {#if form?.message}<p class="feedback error" role="alert">{form.message}</p>{/if}
-    <form method="POST">
+    <form
+      method="POST"
+      aria-busy={submitting}
+      use:enhance={({ cancel }) => {
+        if (submitting) {
+          cancel();
+          return;
+        }
+        submitting = true;
+        return async ({ update }) => {
+          try {
+            await update({ reset: false });
+          } finally {
+            submitting = false;
+          }
+        };
+      }}
+    >
       {#if register}<label
           >Ваше имя<input
             name="name"
@@ -42,6 +61,8 @@
           type="email"
           name="email"
           autocomplete="email"
+          autocapitalize="none"
+          spellcheck="false"
           required
           value={form?.email ?? ''}
         /></label
@@ -57,6 +78,7 @@
             required
             minlength="10"
             maxlength="128"
+            aria-describedby={register ? 'password-hint' : undefined}
           />
           {#if mounted}
             <button
@@ -86,9 +108,16 @@
           {/if}
         </div>
       </div>
-      <p class="muted">От 10 до 128 символов</p>
-      <button class="primary" name="mode" value={register ? 'register' : 'login'}
-        >{register ? 'Зарегистрироваться' : 'Войти'} <span aria-hidden="true">↗</span></button
+      {#if register}<p id="password-hint" class="muted">От 10 до 128 символов</p>{/if}
+      <input type="hidden" name="mode" value={register ? 'register' : 'login'} />
+      <button class="primary" disabled={submitting}
+        >{submitting
+          ? register
+            ? 'Создаём аккаунт…'
+            : 'Входим…'
+          : register
+            ? 'Зарегистрироваться'
+            : 'Войти'} <span aria-hidden="true">↗</span></button
       >
       <a class="text-button" href={register ? '/login' : '/login?mode=register'}
         >{register ? 'Уже есть аккаунт? Войти' : 'Впервые здесь? Создать аккаунт'}</a
