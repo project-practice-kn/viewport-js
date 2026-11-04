@@ -15,6 +15,8 @@ docker compose up --build -d --wait
 
 Node.js на хосте нужен только для однократной генерации `.env`; вариант этой команды тоже через Docker есть в [инструкции запуска](docs/deployment.md). Существующие настройки и секреты скрипт сохраняет, новые секреты не выводит в лог.
 
+Для TrueNAS с существующим Traefik и доменом `https://calendar.samuraj.su:4443` используйте отдельный [compose.truenas.yaml](compose.truenas.yaml) и [пошаговый гайд](docs/truenas.md). Он не объединяется с локальным Compose; app и приватный S3 маршрутизируются через Docker labels.
+
 ```sh
 docker compose ps
 docker compose logs --tail=50 app

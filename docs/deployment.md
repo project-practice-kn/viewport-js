@@ -1,5 +1,7 @@
 # Запуск и обслуживание
 
+TrueNAS + существующий Traefik (`proxy`, `websecure`, resolver `le`, `calendar.samuraj.su:4443`) описан в отдельном [гайде](truenas.md) с [production Compose](../compose.truenas.yaml). Ниже — локальный запуск и обслуживание.
+
 ## Первый запуск
 
 Создайте `.env` со случайными секретами, затем поднимите весь проект:

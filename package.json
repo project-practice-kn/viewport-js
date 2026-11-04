@@ -23,7 +23,7 @@
     "db:migrate": "node --env-file-if-exists=.env --import tsx scripts/migrate.ts",
     "s3:setup": "node --env-file-if-exists=.env --import tsx scripts/setup-s3.ts",
     "uploads:cleanup": "node --env-file-if-exists=.env --import tsx scripts/cleanup.ts",
-    "test": "node --env-file-if-exists=.env --import tsx tests/domain.test.ts",
+    "test": "node --import tsx tests/domain.test.ts",
     "test:smoke": "node --env-file-if-exists=.env --import tsx scripts/smoke.ts",
     "s3:local": "node --env-file-if-exists=.env scripts/local-s3.mjs"
   },

@@ -9,6 +9,8 @@ import { migrate } from 'drizzle-orm/better-sqlite3/migrator';
 const folder = mkdtempSync(join(tmpdir(), 'viewport-test-'));
 process.env.DATABASE_PATH = join(folder, 'test.db');
 process.env.USER_STORAGE_QUOTA_BYTES = '100';
+process.env.BETTER_AUTH_SECRET = randomUUID() + randomUUID();
+process.env.ORIGIN = 'http://localhost:5173';
 const { db, openDatabase } = await import('../src/lib/server/db/index.ts');
 const { user, photos, reservations, galleries } = await import('../src/lib/server/db/schema.ts');
 const service = await import('../src/lib/server/galleries/index.ts');
