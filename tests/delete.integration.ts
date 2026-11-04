@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import http from 'node:http';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -32,7 +33,7 @@ try {
   const form = new FormData();
   form.set('title', 'Проверка удаления');
   const id = galleries.create(owner, form);
-  const [photo] = uploads.reserve(owner, id, [{ name: 'x.png', size: 1, type: 'image/png' }]);
+  const [photo] = uploads.reserve(owner, id, [{ name: 'x.png', size: 2, type: 'image/png' }]);
   const preview = photo.originalKey.replace('/originals/', '/previews/') + '.webp';
   keys.push(photo.uploadKey, photo.originalKey, preview);
   for (const key of keys) await storage.put(key, Buffer.from('x'), 'image/png');
@@ -60,7 +61,33 @@ try {
   } finally {
     stub.mock.restore();
   }
+  // Start the signed PUT before deleting the gallery, and finish it afterwards.
+  const putUrl = await storage.presignPut(photo.uploadKey, 'image/png', 2, 300);
+  let finishPut!: () => void;
+  const latePut = new Promise<number>((resolve, reject) => {
+    const request = http.request(
+      putUrl,
+      { method: 'PUT', headers: { 'content-type': 'image/png', 'content-length': '2' } },
+      (response) => {
+        response.resume();
+        response.on('end', () => resolve(response.statusCode ?? 0));
+      },
+    );
+    request.on('error', reject);
+    request.write('a');
+    finishPut = () => request.end('b');
+  });
+  await new Promise((resolve) => setTimeout(resolve, 100));
   await galleries.remove(owner, id);
+  finishPut();
+  assert.equal(await latePut, 200);
+  assert.equal((await storage.head(photo.uploadKey)).ContentLength, 2);
+  assert.ok(
+    database.$client
+      .prepare('select upload_key from deleted_uploads where upload_key=?')
+      .get(photo.uploadKey),
+  );
+  await uploads.cleanupDeletedUploads(100);
   for (const key of keys)
     await assert.rejects(
       storage.head(key),
@@ -79,7 +106,7 @@ try {
       .n,
     0,
   );
-  console.log('Удаление реальных S3-объектов после сбоя и повторной попытки: успешно');
+  console.log('Отказ S3, повтор удаления и позднее завершение PUT: успешно');
 } finally {
   for (const key of keys) await storage.remove(key);
   database.$client.close();
