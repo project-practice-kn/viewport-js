@@ -200,6 +200,20 @@ try {
     assert.equal(metadata.format, 'webp');
     assert.equal(metadata.exif, undefined);
   }
+  const ownerDownload = (galleryId: string, photoId: string) =>
+    `/api/galleries/${galleryId}/photos/${photoId}/download`;
+  for (const original of originals) {
+    const response = await req(ownerDownload(id, original.id), a.cookie);
+    assert.equal(response.status, 302, 'Владелец скачивает оригинал черновика');
+    assert.match(response.headers.get('cache-control')!, /no-store/);
+    const downloaded = await fetch(response.headers.get('location')!);
+    assert.ok(downloaded.ok);
+    assert.equal(hash(new Uint8Array(await downloaded.arrayBuffer())), hash(original.data));
+    assert.match(downloaded.headers.get('content-disposition')!, /filename\*=UTF-8/i);
+  }
+  assert.equal((await req(ownerDownload(id, originals[0].id), b.cookie)).status, 404);
+  assert.equal((await req(ownerDownload(id, originals[0].id))).status, 303);
+  assert.equal((await req(ownerDownload(id, randomUUID()), a.cookie)).status, 404);
   // Two independent HTTP requests compete for the last 100 bytes in real SQLite.
   const quotaGallery = await create(b.cookie, 'Гонка квоты');
   const held = await reserve(quotaGallery, b.cookie, Buffer.alloc(1), 'hold.png', 'image/png');
@@ -283,6 +297,7 @@ try {
   await fetch(bad.url, { method: 'PUT', headers: bad.requiredHeaders, body: malformed });
   assert.equal((await req('/api/uploads/confirm', a.cookie, { photoId: bad.id })).status, 422);
   const pending = await reserve(id, a.cookie, Buffer.alloc(1), 'pending.png', 'image/png');
+  assert.equal((await req(ownerDownload(id, pending.id), a.cookie)).status, 404);
   assert.equal(
     (await action(id, a.cookie, 'publish')).status,
     409,
@@ -330,10 +345,13 @@ try {
     assert.match(downloaded.headers.get('content-disposition')!, /filename\*=UTF-8/i);
   }
   const otherId = await create(b.cookie, 'Другая');
+  assert.equal((await req(ownerDownload(otherId, originals[0].id), b.cookie)).status, 404);
+  assert.equal((await req(ownerDownload(id, originals[0].id), a.cookie)).status, 302);
   assert.equal((await req(`/api/downloads/${token}/${otherId}`)).status, 404);
   assert.equal((await action(id, a.cookie, 'unpublish')).status, 200);
   assert.equal((await req(`/g/${token}`)).status, 404);
   assert.equal((await req(`/api/downloads/${token}/${originals[0].id}`)).status, 404);
+  assert.equal((await req(ownerDownload(id, originals[0].id), a.cookie)).status, 302);
   assert.equal((await req('/g/unknown')).status, 404);
   assert.equal((await req('/logout', a.cookie, new URLSearchParams())).status, 303);
   assert.equal(

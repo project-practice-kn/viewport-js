@@ -627,6 +627,35 @@ fieldset {
 .public-grid figcaption a {
   text-decoration: underline;
 }
+.pswp__photo-description,
+.pswp__download-original {
+  position: absolute;
+  z-index: 20;
+  left: 12px;
+  right: 12px;
+  color: #fff;
+  text-align: center;
+  text-shadow: 0 1px 4px #000;
+}
+.pswp__photo-description {
+  bottom: 56px;
+  overflow-wrap: anywhere;
+  max-height: 4.5em;
+  overflow: auto;
+}
+.pswp__download-original {
+  bottom: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  text-decoration: underline;
+}
+.pswp__button:focus-visible,
+.pswp__download-original:focus-visible {
+  outline: 3px solid #fff;
+  outline-offset: -3px;
+}
 .story-footer {
   border-top: 1px solid var(--line);
   margin-top: 65px;

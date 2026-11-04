@@ -37,6 +37,7 @@
     "better-sqlite3": "13.0.3",
     "bulma": "1.0.4",
     "drizzle-orm": "0.45.4",
+    "photoswipe": "^5.4.4",
     "sharp": "0.35.5"
   },
   "devDependencies": {

@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { PageProps } from './$types';
   import { formatPhotos } from '#lib/format.ts';
+  import { photoViewer } from '#lib/photoViewer.ts';
   let { data }: PageProps = $props();
   let cover = $derived(data.photos.find((p) => p.id === data.coverId));
 </script>
@@ -26,13 +27,18 @@
       height={cover.height}
       fetchpriority="high"
     />{/if}
-  <div class="photo-grid public-grid">
+  <div class="photo-grid public-grid" data-downloads="true" use:photoViewer>
     {#each data.photos as photo, i (photo.id)}<figure>
         <a
+          class="photo-preview"
           href={photo.url}
           target="_blank"
           rel="noreferrer"
-          aria-label={`Посмотреть ${photo.filename} в новой вкладке`}
+          data-filename={photo.filename}
+          data-download={`/api/downloads/${data.token}/${photo.id}`}
+          data-pswp-width={photo.width}
+          data-pswp-height={photo.height}
+          aria-label={`Посмотреть ${photo.filename}`}
           ><img
             src={photo.url}
             alt={photo.filename}

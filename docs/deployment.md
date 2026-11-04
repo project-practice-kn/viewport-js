@@ -66,6 +66,25 @@ docker compose --profile tools run --rm smoke
 
 Профиль tools запускает smoke из того же образа с доступом к SQLite volume. На Linux используется host network, чтобы проверять те же `localhost` URL, которыми пользуется браузер. На Docker Desktop для этой команды нужно включить host networking. Smoke создаёт отдельные аккаунты и удаляет только собственные записи/объекты. Unit tests, типы и сборка: `npm test` и `npm run verify`.
 
+## Разработка с автоматическим обновлением
+
+Для работы с теми же галереями и файлами запустите development-режим Compose:
+
+```sh
+docker compose -f compose.yaml -f compose.dev.yaml up --build -d --wait
+```
+
+Откройте **http://localhost:5173**. Изменения в `src/` и `static/` подхватываются Vite автоматически; пересборка и перезапуск для них не нужны. При первом запуске создаётся отдельный development-образ; для следующих запусков достаточно `docker compose -f compose.yaml -f compose.dev.yaml up -d --wait`. После изменения `package.json`, `package-lock.json` или `Dockerfile.dev` повторите команду с `--build`. Миграции и S3 настраиваются перед запуском; используются те же volumes `app-data` и `s3-data`, что и в обычном Compose. Compose заменяет приложение, поэтому два процесса не работают с одной SQLite одновременно.
+
+Посмотреть журнал и вернуться к обычному запуску:
+
+```sh
+docker compose -f compose.yaml -f compose.dev.yaml logs -f app
+docker compose up --build -d --wait
+```
+
+Изменения миграций применяются при следующем запуске контейнера. Если настройка Vite или TypeScript менялась заменой файла, пересоздайте приложение той же командой development-режима. На файловых системах, не передающих события изменения в контейнер, может понадобиться polling файлового наблюдателя.
+
 ## Разработка на хосте
 
 Нужен Node.js 24 или 26; `.node-version` выбирает Node.js 24 по умолчанию. Если контейнер app запущен, сначала `docker compose stop app`, чтобы освободить порт и исключить несколько процессов. Затем:
