@@ -98,10 +98,10 @@ function getPhoto(userId: string, photoId: string) {
   return { photo, reservation };
 }
 export async function presign(userId: string, galleryId: string, files: FileMetadata[]) {
-  await cleanup(10);
+  await cleanup(10, { deletedUploads: false });
   const batch = reserve(userId, galleryId, files);
   try {
-    return await Promise.all(
+    const result = await Promise.all(
       batch.map(async (p) => ({
         id: p.id,
         url: await storage.presignPut(
@@ -114,6 +114,8 @@ export async function presign(userId: string, galleryId: string, files: FileMeta
         expiresAt: p.expiresAt.toISOString(),
       })),
     );
+    scheduleDeletedUploadCleanup();
+    return result;
   } catch {
     batch.forEach((p) => failPhoto(p.id));
     error(503, 'Не удалось подготовить загрузку. Повторите запрос');
@@ -179,6 +181,18 @@ export function recoverExpiredProcessing(galleryId: string) {
         .where(eq(photos.id, id))
         .run();
   }
+}
+
+let deletedUploadCleanupRunning = false;
+function scheduleDeletedUploadCleanup() {
+  if (deletedUploadCleanupRunning) return;
+  deletedUploadCleanupRunning = true;
+  // A failed pass remains retryable and must never reject the upload request.
+  void cleanupDeletedUploads(10)
+    .catch(() => {})
+    .finally(() => {
+      deletedUploadCleanupRunning = false;
+    });
 }
 
 // A PUT already in progress may recreate an object after any successful DELETE.
@@ -298,8 +312,8 @@ export function cancel(userId: string, photoId: string) {
     failPhoto(photoId);
   });
 }
-export async function cleanup(batchSize = 25) {
-  await cleanupDeletedUploads(batchSize);
+export async function cleanup(batchSize = 25, options: { deletedUploads?: boolean } = {}) {
+  if (options.deletedUploads !== false) await cleanupDeletedUploads(batchSize);
   const candidates = db()
     .select({ photo: photos, reservation: reservations })
     .from(photos)

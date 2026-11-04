@@ -551,3 +551,59 @@ test('Повторная очистка сохраняет ключ после �
     stub.mock.restore();
   }
 });
+
+test('Очистка удалённых загрузок не задерживает presign и не запускается параллельно', async () => {
+  const { s3 } = await import('../src/lib/server/storage/index.ts');
+  const client = s3();
+  const id = service.create('other', form('Медленное хранилище'));
+  const sql = database.$client;
+  sql.prepare('update upload_reservations set cleaned_at=?').run(Date.now());
+  const key = `test/slow-${randomUUID()}`;
+  sql.prepare('update deleted_uploads set checked_at=?').run(Date.now() + 100000);
+  sql.prepare('insert into deleted_uploads(upload_key, checked_at) values (?, null)').run(key);
+  let release!: () => void;
+  let started!: () => void;
+  let calls = 0;
+  const blocked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const began = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+  const stub = mock.method(client, 'send', (async () => {
+    calls++;
+    started();
+    await blocked;
+    return {};
+  }) as typeof client.send);
+  try {
+    const uploadsReady = uploads.presign('other', id, [
+      { name: 'a.png', size: 1, type: 'image/png' },
+    ]);
+    await began;
+    const result = await Promise.race([
+      uploadsReady,
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('presign ожидает очистку')), 1000),
+      ),
+    ]);
+    assert.equal(result.length, 1);
+    await uploads.presign('other', id, [{ name: 'b.png', size: 1, type: 'image/png' }]);
+    assert.equal(calls, 1);
+  } finally {
+    release();
+    // Let the bounded background batch finish before restoring the stub/closing SQLite.
+    const deadline = Date.now() + 1000;
+    while (
+      Date.now() < deadline &&
+      calls <
+        Math.min(
+          10,
+          (sql.prepare('select count(*) n from deleted_uploads').get() as { n: number }).n,
+        )
+    )
+      await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    stub.mock.restore();
+  }
+});
