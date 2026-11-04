@@ -13,3 +13,6 @@ test-results/
 playwright-report/
 .DS_Store
 *.log
+compose.local.yaml
+docs/local.md
+tasks/issues/VP-036.md

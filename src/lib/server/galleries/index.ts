@@ -2,15 +2,18 @@ import { randomUUID, randomBytes } from 'node:crypto';
 import { and, eq, asc, desc } from 'drizzle-orm';
 import { error } from '@sveltejs/kit';
 import { db, atomic } from '../db/index.ts';
-import { galleries, photos, reservations } from '../db/schema.ts';
-import { presignGet } from '../storage/index.ts';
-export function owned(userId: string, id: string, draft = false) {
+import { galleries, photos, reservations, deletedUploads } from '../db/schema.ts';
+import { presignGet, remove as removeObject } from '../storage/index.ts';
+import { recoverExpiredProcessing } from '../photos/index.ts';
+export function owned(userId: string, id: string, draft = false, allowDeleting = false) {
   const gallery = db()
     .select()
     .from(galleries)
     .where(and(eq(galleries.id, id), eq(galleries.userId, userId)))
     .get();
   if (!gallery) error(404, 'Галерея не найдена');
+  if (gallery.deleting && !allowDeleting)
+    error(409, 'Удаление галереи не завершено. Повторите удаление');
   if (draft && gallery.status !== 'draft') error(409, 'Сначала снимите галерею с публикации');
   return gallery;
 }
@@ -20,6 +23,7 @@ export const list = (userId: string) =>
       id: galleries.id,
       title: galleries.title,
       status: galleries.status,
+      deleting: galleries.deleting,
       createdAt: galleries.createdAt,
     })
     .from(galleries)
@@ -157,4 +161,74 @@ export async function download(token: string, photoId: string) {
   const photo = readyPhotos(gallery.id).find((p) => p.id === photoId);
   if (!photo) error(404, 'Галерея не найдена');
   return presignGet(photo.originalKey, photo.filename);
+}
+
+// Keep the gallery and all object keys until every S3 delete succeeds. The durable
+// flag prevents new uploads or publication while the operation is retried.
+export async function remove(userId: string, id: string) {
+  const items = atomic(() => {
+    const gallery = owned(userId, id, false, true);
+    if (gallery.status !== 'draft') error(409, 'Сначала снимите галерею с публикации');
+    recoverExpiredProcessing(id);
+    const items = db()
+      .select({ photo: photos, reservation: reservations })
+      .from(photos)
+      .leftJoin(reservations, eq(reservations.photoId, photos.id))
+      .where(eq(photos.galleryId, id))
+      .all();
+    if (items.some(({ photo }) => photo.status === 'processing'))
+      error(409, 'Дождитесь завершения обработки фотографий');
+    if (items.some(({ reservation }) => !reservation))
+      error(409, 'Не найдены сведения о загрузке. Обратитесь к администратору');
+    const waitUntil = Math.max(
+      0,
+      ...items.map(({ reservation }) => reservation!.expiresAt.getTime()),
+    );
+    if (waitUntil > Date.now())
+      error(
+        409,
+        `Повторите удаление через ${Math.ceil((waitUntil - Date.now()) / 60000)} мин.: ещё действует ссылка загрузки`,
+      );
+    db()
+      .update(galleries)
+      .set({ deleting: true, updatedAt: new Date() })
+      .where(eq(galleries.id, id))
+      .run();
+    return items;
+  });
+  try {
+    for (const { photo } of items) {
+      for (const key of new Set([
+        photo.uploadKey,
+        photo.originalKey,
+        photo.previewKey ?? photo.originalKey.replace('/originals/', '/previews/') + '.webp',
+      ]))
+        await removeObject(key);
+    }
+  } catch {
+    error(503, 'Не удалось удалить файлы из хранилища. Повторите удаление галереи');
+  }
+  atomic(() => {
+    const gallery = db()
+      .select()
+      .from(galleries)
+      .where(and(eq(galleries.id, id), eq(galleries.userId, userId)))
+      .get();
+    if (!gallery) return; // Another identical deletion finished first.
+    const ids = db()
+      .select({ id: photos.id, uploadKey: photos.uploadKey })
+      .from(photos)
+      .where(eq(photos.galleryId, id))
+      .all();
+    for (const photo of ids)
+      db()
+        .insert(deletedUploads)
+        .values({ uploadKey: photo.uploadKey })
+        .onConflictDoNothing()
+        .run();
+    for (const photo of ids)
+      db().delete(reservations).where(eq(reservations.photoId, photo.id)).run();
+    db().delete(photos).where(eq(photos.galleryId, id)).run();
+    db().delete(galleries).where(eq(galleries.id, id)).run();
+  });
 }

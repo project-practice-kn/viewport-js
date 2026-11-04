@@ -1,4 +1,4 @@
-import { test, after } from 'node:test';
+import { test, after, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -347,5 +347,263 @@ test('Auth: invite нельзя обойти через API, лимитер об
   } finally {
     if (previous === undefined) delete process.env.REGISTRATION_INVITE_CODE;
     else process.env.REGISTRATION_INVITE_CODE = previous;
+  }
+});
+
+test('Удаление draft: владелец, обработка, срок PUT, отказ S3 и повтор', async () => {
+  const empty = service.create('owner', form('Пустая'));
+  await assert.rejects(service.remove('other', empty), httpError(404));
+  await service.remove('owner', empty);
+  assert.throws(() => service.owned('owner', empty), httpError(404));
+
+  const id = service.create('other', form('Удаление'));
+  const [p] = uploads.reserve('other', id, [{ name: 'x.png', size: 1, type: 'image/png' }]);
+  const sql = database.$client;
+  sql.prepare("update photos set status='processing' where id=?").run(p.id);
+  await assert.rejects(service.remove('other', id), httpError(409));
+  sql
+    .prepare(
+      "update photos set status='ready',preview_key=?,width=1,height=1,preview_size=1 where id=?",
+    )
+    .run(p.originalKey.replace('/originals/', '/previews/') + '.webp', p.id);
+  sql.prepare("update upload_reservations set status='completed' where photo_id=?").run(p.id);
+  service.cover('other', id, p.id);
+  service.publish('other', id);
+  await assert.rejects(service.remove('other', id), httpError(409));
+  service.unpublish('other', id);
+  await assert.rejects(service.remove('other', id), httpError(409));
+  sql
+    .prepare('update upload_reservations set expires_at=? where photo_id=?')
+    .run(Date.now() - 1, p.id);
+
+  const { s3 } = await import('../src/lib/server/storage/index.ts');
+  let calls = 0;
+  const client = s3();
+  const stub = mock.method(client, 'send', (async () => {
+    if (++calls === 2) throw new Error('S3 недоступен');
+    return {};
+  }) as typeof client.send);
+  try {
+    await assert.rejects(service.remove('other', id), httpError(503));
+    assert.equal(service.owned('other', id, false, true).deleting, true);
+    assert.throws(() => service.publish('other', id), httpError(409));
+    assert.throws(
+      () => uploads.reserve('other', id, [{ name: 'x.png', size: 1, type: 'image/png' }]),
+      httpError(409),
+    );
+    assert.equal(
+      (sql.prepare('select count(*) as n from photos where gallery_id=?').get(id) as { n: number })
+        .n,
+      1,
+    );
+    await service.remove('other', id);
+    assert.equal(calls, 5);
+    assert.equal(
+      (sql.prepare('select count(*) as n from photos where gallery_id=?').get(id) as { n: number })
+        .n,
+      0,
+    );
+    assert.equal(
+      (
+        sql.prepare('select count(*) as n from upload_reservations where photo_id=?').get(p.id) as {
+          n: number;
+        }
+      ).n,
+      0,
+    );
+    assert.throws(() => service.owned('other', id), httpError(404));
+  } finally {
+    stub.mock.restore();
+  }
+});
+
+test('Форма удаления требует сессию, владельца и явное подтверждение', async () => {
+  const { actions } = await import('../src/routes/dashboard/galleries/[id]/+page.server.ts');
+  const id = service.create('owner', form('Форма удаления'));
+  const event = (actor: string | null, confirmed: boolean) =>
+    ({
+      locals: { user: actor ? { id: actor } : null },
+      params: { id },
+      request: new Request('http://localhost/dashboard', {
+        method: 'POST',
+        body: new URLSearchParams(confirmed ? { confirm: 'yes' } : {}),
+      }),
+    }) as unknown as Parameters<typeof actions.delete>[0];
+  await assert.rejects(
+    actions.delete(event(null, true)),
+    (e: unknown) => !!e && typeof e === 'object' && 'status' in e && e.status === 303,
+  );
+  assert.equal((await actions.delete(event('owner', false)))?.status, 400);
+  assert.equal((await actions.delete(event('other', true)))?.status, 404);
+  await assert.rejects(
+    actions.delete(event('owner', true)),
+    (e: unknown) =>
+      !!e &&
+      typeof e === 'object' &&
+      'status' in e &&
+      e.status === 303 &&
+      'location' in e &&
+      e.location === '/dashboard',
+  );
+  assert.throws(() => service.owned('owner', id), httpError(404));
+});
+
+test('Удаление восстанавливает истёкшую зависшую обработку и сохраняет ключ для повторной очистки', async () => {
+  const id = service.create('other', form('Зависшая обработка'));
+  const [p] = uploads.reserve('other', id, [{ name: 'x.png', size: 1, type: 'image/png' }]);
+  const sql = database.$client;
+  sql.prepare("update photos set status='processing' where id=?").run(p.id);
+  sql
+    .prepare('update upload_reservations set expires_at=? where photo_id=?')
+    .run(Date.now() - 1, p.id);
+  const { s3 } = await import('../src/lib/server/storage/index.ts');
+  const client = s3();
+  let keys: string[] = [];
+  const stub = mock.method(client, 'send', (async (command: { input: { Key: string } }) => {
+    keys.push(command.input.Key);
+    return {};
+  }) as typeof client.send);
+  try {
+    await service.remove('other', id);
+    assert.ok(
+      sql.prepare('select upload_key from deleted_uploads where upload_key=?').get(p.uploadKey),
+    );
+    keys = [];
+    await uploads.cleanupDeletedUploads(1000);
+    assert.ok(keys.includes(p.uploadKey));
+    keys = [];
+    await uploads.cleanupDeletedUploads(1000);
+    assert.ok(keys.includes(p.uploadKey));
+    assert.ok(
+      sql.prepare('select upload_key from deleted_uploads where upload_key=?').get(p.uploadKey),
+    );
+  } finally {
+    stub.mock.restore();
+  }
+});
+
+test('Истёкшая, но ещё работающая обработка блокирует удаление', async () => {
+  const id = service.create('other', form('Работающая обработка'));
+  const [p] = uploads.reserve('other', id, [{ name: 'x.png', size: 1, type: 'image/png' }]);
+  const { s3 } = await import('../src/lib/server/storage/index.ts');
+  const client = s3();
+  let release!: () => void;
+  let started!: () => void;
+  const pending = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const began = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+  const stub = mock.method(client, 'send', (async () => {
+    started();
+    await pending;
+    return { ContentLength: 0 };
+  }) as typeof client.send);
+  try {
+    const confirm = uploads.confirm('other', p.id);
+    await began;
+    database.$client
+      .prepare('update upload_reservations set expires_at=? where photo_id=?')
+      .run(Date.now() - 1, p.id);
+    await assert.rejects(service.remove('other', id), httpError(409));
+    release();
+    await assert.rejects(confirm, httpError(422));
+    await service.remove('other', id);
+  } finally {
+    release();
+    stub.mock.restore();
+  }
+});
+
+test('Повторная очистка сохраняет ключ после отказа S3', async () => {
+  const id = service.create('other', form('Повтор очистки'));
+  const [p] = uploads.reserve('other', id, [{ name: 'x.png', size: 1, type: 'image/png' }]);
+  database.$client
+    .prepare('update upload_reservations set expires_at=? where photo_id=?')
+    .run(Date.now() - 1, p.id);
+  const { s3 } = await import('../src/lib/server/storage/index.ts');
+  const client = s3();
+  let fail = false;
+  let attempts = 0;
+  const stub = mock.method(client, 'send', (async (command: { input: { Key: string } }) => {
+    if (command.input.Key === p.uploadKey) {
+      attempts++;
+      if (fail) throw new Error('S3 недоступен');
+    }
+    return {};
+  }) as typeof client.send);
+  try {
+    await service.remove('other', id);
+    attempts = 0;
+    fail = true;
+    await uploads.cleanupDeletedUploads(1000);
+    assert.equal(attempts, 1);
+    assert.ok(
+      database.$client
+        .prepare('select upload_key from deleted_uploads where upload_key=?')
+        .get(p.uploadKey),
+    );
+    fail = false;
+    await uploads.cleanupDeletedUploads(1000);
+    assert.equal(attempts, 2);
+  } finally {
+    stub.mock.restore();
+  }
+});
+
+test('Очистка удалённых загрузок не задерживает presign и не запускается параллельно', async () => {
+  const { s3 } = await import('../src/lib/server/storage/index.ts');
+  const client = s3();
+  const id = service.create('other', form('Медленное хранилище'));
+  const sql = database.$client;
+  sql.prepare('update upload_reservations set cleaned_at=?').run(Date.now());
+  const key = `test/slow-${randomUUID()}`;
+  sql.prepare('update deleted_uploads set checked_at=?').run(Date.now() + 100000);
+  sql.prepare('insert into deleted_uploads(upload_key, checked_at) values (?, null)').run(key);
+  let release!: () => void;
+  let started!: () => void;
+  let calls = 0;
+  const blocked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const began = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+  const stub = mock.method(client, 'send', (async () => {
+    calls++;
+    started();
+    await blocked;
+    return {};
+  }) as typeof client.send);
+  try {
+    const uploadsReady = uploads.presign('other', id, [
+      { name: 'a.png', size: 1, type: 'image/png' },
+    ]);
+    await began;
+    const result = await Promise.race([
+      uploadsReady,
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('presign ожидает очистку')), 1000),
+      ),
+    ]);
+    assert.equal(result.length, 1);
+    await uploads.presign('other', id, [{ name: 'b.png', size: 1, type: 'image/png' }]);
+    assert.equal(calls, 1);
+  } finally {
+    release();
+    // Let the bounded background batch finish before restoring the stub/closing SQLite.
+    const deadline = Date.now() + 1000;
+    while (
+      Date.now() < deadline &&
+      calls <
+        Math.min(
+          10,
+          (sql.prepare('select count(*) n from deleted_uploads').get() as { n: number }).n,
+        )
+    )
+      await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    stub.mock.restore();
   }
 });
