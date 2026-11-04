@@ -162,6 +162,12 @@ export async function download(token: string, photoId: string) {
   if (!photo) error(404, 'Галерея не найдена');
   return presignGet(photo.originalKey, photo.filename);
 }
+export async function downloadOwned(userId: string, galleryId: string, photoId: string) {
+  const gallery = owned(userId, galleryId);
+  const photo = readyPhotos(gallery.id).find((p) => p.id === photoId);
+  if (!photo) error(404, 'Фотография не найдена');
+  return presignGet(photo.originalKey, photo.filename);
+}
 
 // Keep the gallery and all object keys until every S3 delete succeeds. The durable
 // flag prevents new uploads or publication while the operation is retried.
