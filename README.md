@@ -2,7 +2,7 @@
 
 Сервис передачи фотографий: фотограф регистрируется, создаёт галерею, загружает JPEG/PNG/WebP, публикует ссылку; клиент без аккаунта смотрит превью и скачивает неизменённый оригинал.
 
-Стек: Node.js 24, SvelteKit 3 / Svelte 5, TypeScript 6, Bulma + CSS, SQLite / Drizzle, Better Auth, приватный S3 и Sharp. Сервер работает одним процессом.
+Стек: Node.js 24 или 26, SvelteKit 3 / Svelte 5, TypeScript 6, Bulma + CSS, SQLite / Drizzle, Better Auth, приватный S3 и Sharp. Сервер работает одним процессом; Docker использует Node.js 24.
 
 ## Запуск в Docker
 
