@@ -5,6 +5,7 @@ import { db, atomic } from '../db/index.ts';
 import { galleries, photos, reservations, deletedUploads } from '../db/schema.ts';
 import { presignGet, remove as removeObject } from '../storage/index.ts';
 import { recoverExpiredProcessing } from '../photos/index.ts';
+import { hasActiveArchive } from '../downloads/active.ts';
 export function owned(userId: string, id: string, draft = false, allowDeleting = false) {
   const gallery = db()
     .select()
@@ -175,6 +176,7 @@ export async function remove(userId: string, id: string) {
   const items = atomic(() => {
     const gallery = owned(userId, id, false, true);
     if (gallery.status !== 'draft') error(409, 'Сначала снимите галерею с публикации');
+    if (hasActiveArchive(id)) error(409, 'Дождитесь завершения скачивания архива');
     recoverExpiredProcessing(id);
     const items = db()
       .select({ photo: photos, reservation: reservations })

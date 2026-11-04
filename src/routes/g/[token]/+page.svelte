@@ -165,6 +165,9 @@
     <h1>{data.title}</h1>
     {#if data.description}<p class="lede">{data.description}</p>{/if}
     <p class="muted">{formatPhotos(data.photos.length)} · оригиналы в полном качестве</p>
+    <a class="download-link" href={`/api/downloads/${data.token}/archive`}
+      >Скачать все фотографии ZIP ↓</a
+    >
     <form method="POST" action="?/theme">
       <input type="hidden" name="theme" value={data.theme === 'dark' ? 'light' : 'dark'} />
       <button type="submit">{data.theme === 'dark' ? 'Светлая тема' : 'Тёмная тема'}</button>

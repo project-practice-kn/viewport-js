@@ -607,3 +607,193 @@ test('Очистка удалённых загрузок не задержива
     stub.mock.restore();
   }
 });
+
+test('ZIP: безопасные имена, отмена, лимит и ошибки S3 освобождают ресурсы', async () => {
+  const { Readable } = await import('node:stream');
+  const { archive, archiveNames } = await import('../src/lib/server/downloads/index.ts');
+  const { hasActiveArchive } = await import('../src/lib/server/downloads/active.ts');
+  const { s3 } = await import('../src/lib/server/storage/index.ts');
+  assert.deepEqual(
+    archiveNames(
+      ['../фото.png', '../фото.png', '_фото (2).png', 'a\\b.jpg'].map((filename) => ({ filename })),
+    ),
+    ['_фото.png', '_фото (2).png', '_фото (2) (2).png', 'a_b.jpg'],
+  );
+  const id = service.create('owner', form('ZIP'));
+  const items = uploads.reserve('owner', id, [
+    { name: '1.png', size: 5, type: 'image/png' },
+    { name: '2.png', size: 5, type: 'image/png' },
+  ]);
+  for (const item of items) {
+    database.$client
+      .prepare(
+        "update photos set status='ready',preview_key=?,width=1,height=1,preview_size=1 where id=?",
+      )
+      .run(`${item.id}.webp`, item.id);
+    database.$client
+      .prepare("update upload_reservations set status='completed',expires_at=? where photo_id=?")
+      .run(Date.now() - 1, item.id);
+  }
+  const client = s3();
+  process.env.ZIP_MAX_CONCURRENT = '1';
+  let body: InstanceType<typeof Readable> | undefined;
+  const stub = mock.method(client, 'send', (async () => {
+    body = new Readable({ read() {} });
+    return { Body: body, ContentLength: 5 };
+  }) as typeof client.send);
+  try {
+    const response = await archive({ userId: 'owner', id }, new AbortController().signal);
+    assert.equal(hasActiveArchive(id), true);
+    await assert.rejects(
+      () => archive({ userId: 'owner', id }, new AbortController().signal),
+      httpError(429),
+    );
+    await assert.rejects(() => service.remove('owner', id), httpError(409));
+    await response.body!.cancel();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(hasActiveArchive(id), false);
+    assert.equal(body!.destroyed, true);
+    stub.mock.mockImplementation((async () => {
+      throw new Error('S3 failure');
+    }) as typeof client.send);
+    await assert.rejects(
+      () => archive({ userId: 'owner', id }, new AbortController().signal),
+      httpError(503),
+    );
+    assert.equal(hasActiveArchive(id), false);
+    let calls = 0;
+    stub.mock.mockImplementation((async () => {
+      if (++calls === 2) throw new Error('S3 failure');
+      return { Body: Readable.from(Buffer.from('12345')), ContentLength: 5 };
+    }) as typeof client.send);
+    const failing = await archive({ userId: 'owner', id }, new AbortController().signal);
+    await assert.rejects(() => failing.arrayBuffer());
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(hasActiveArchive(id), false);
+  } finally {
+    stub.mock.restore();
+    delete process.env.ZIP_MAX_CONCURRENT;
+  }
+});
+
+test('Конкурентный lifecycle: confirm, публикация, ZIP, unpublish и удаление', async () => {
+  const { Readable, PassThrough } = await import('node:stream');
+  const { eq } = await import('drizzle-orm');
+  const { archive } = await import('../src/lib/server/downloads/index.ts');
+  const { s3 } = await import('../src/lib/server/storage/index.ts');
+  const { HeadObjectCommand, GetObjectCommand, DeleteObjectCommand } =
+    await import('@aws-sdk/client-s3');
+  const id = service.create('owner', form('Гонки ZIP'));
+  const previousQuota = process.env.USER_STORAGE_QUOTA_BYTES;
+  process.env.USER_STORAGE_QUOTA_BYTES = '100000';
+  const png = await sharp({ create: { width: 2, height: 2, channels: 3, background: '#abcdef' } })
+    .png()
+    .toBuffer();
+  const [old, pending] = uploads.reserve('owner', id, [
+    { name: 'old.png', size: 5, type: 'image/png' },
+    { name: 'new.png', size: png.length, type: 'image/png' },
+  ]);
+  database.$client
+    .prepare(
+      "update photos set status='ready',preview_key=?,width=1,height=1,preview_size=1 where id=?",
+    )
+    .run(`${old.id}.webp`, old.id);
+  database.$client
+    .prepare("update upload_reservations set status='completed' where photo_id=?")
+    .run(old.id);
+  service.cover('owner', id, old.id);
+  const oldRow = database.select().from(photos).where(eq(photos.id, old.id)).get()!;
+  const pendingRow = database.select().from(photos).where(eq(photos.id, pending.id)).get()!;
+  let allowHead!: () => void;
+  const headGate = new Promise<void>((resolve) => {
+    allowHead = resolve;
+  });
+  let allowDelete!: () => void;
+  const deleteGate = new Promise<void>((resolve) => {
+    allowDelete = resolve;
+  });
+  let held: InstanceType<typeof PassThrough> | undefined;
+  let holdOriginal = true;
+  const client = s3();
+  const stub = mock.method(client, 'send', (async (
+    command:
+      | InstanceType<typeof HeadObjectCommand>
+      | InstanceType<typeof GetObjectCommand>
+      | InstanceType<typeof DeleteObjectCommand>,
+  ) => {
+    if (command instanceof HeadObjectCommand) {
+      await headGate;
+      return { ContentLength: png.length };
+    }
+    if (command instanceof DeleteObjectCommand) {
+      await deleteGate;
+      return {};
+    }
+    if (command instanceof GetObjectCommand) {
+      if (
+        command.input.Key === pendingRow.uploadKey ||
+        command.input.Key === pendingRow.originalKey
+      )
+        return { Body: Readable.from(png), ContentLength: png.length };
+      assert.equal(command.input.Key, oldRow.originalKey);
+      if (holdOriginal) {
+        held = new PassThrough();
+        return { Body: held, ContentLength: 5 };
+      }
+      return { Body: Readable.from(Buffer.from('12345')), ContentLength: 5 };
+    }
+    return {};
+  }) as typeof client.send);
+  try {
+    const confirming = uploads.confirm('owner', pending.id);
+    assert.equal(
+      database.select().from(photos).where(eq(photos.id, pending.id)).get()!.status,
+      'processing',
+    );
+    assert.throws(() => service.publish('owner', id), httpError(409));
+    await assert.rejects(() => uploads.confirm('other', pending.id), httpError(404));
+    await assert.rejects(
+      () => archive({ userId: 'other', id }, new AbortController().signal),
+      httpError(404),
+    );
+    const draftArchive = await archive({ userId: 'owner', id }, new AbortController().signal);
+    allowHead();
+    assert.equal((await confirming).status, 'ready');
+    const draftBytes = draftArchive.arrayBuffer();
+    held!.end('12345');
+    const draftZip = Buffer.from(await draftBytes);
+    assert.ok(draftZip.includes(Buffer.from('old.png')));
+    assert.ok(!draftZip.includes(Buffer.from('new.png')), 'Состав ZIP фиксируется до confirm');
+
+    const token = service.publish('owner', id)!;
+    const publicArchive = await archive({ token }, new AbortController().signal);
+    service.unpublish('owner', id);
+    await assert.rejects(() => archive({ token }, new AbortController().signal), httpError(404));
+    await assert.rejects(() => service.remove('owner', id), httpError(409));
+    const publicBytes = publicArchive.arrayBuffer();
+    holdOriginal = false;
+    held!.end('12345');
+    const publicZip = Buffer.from(await publicBytes);
+    assert.ok(
+      publicZip.includes(Buffer.from('old.png')) && publicZip.includes(Buffer.from('new.png')),
+    );
+    database.$client
+      .prepare('update upload_reservations set expires_at=? where photo_id in (?,?)')
+      .run(Date.now() - 1, old.id, pending.id);
+    const deleting = service.remove('owner', id);
+    await assert.rejects(
+      () => archive({ userId: 'owner', id }, new AbortController().signal),
+      httpError(409),
+    );
+    assert.throws(() => service.publish('owner', id), httpError(409));
+    allowDelete();
+    await deleting;
+    assert.throws(() => service.owned('owner', id), httpError(404));
+  } finally {
+    allowHead();
+    allowDelete();
+    held?.destroy();
+    stub.mock.restore();
+    process.env.USER_STORAGE_QUOTA_BYTES = previousQuota;
+  }
+});
