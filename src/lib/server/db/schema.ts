@@ -70,6 +70,7 @@ export const galleries = sqliteTable(
     status: text('status', { enum: ['draft', 'published'] })
       .notNull()
       .default('draft'),
+    deleting: integer('deleting', { mode: 'boolean' }).notNull().default(false),
     token: text('token').unique(),
     coverId: text('cover_id'),
     createdAt: date('created_at'),
@@ -148,4 +149,15 @@ export const reservations = sqliteTable(
     check('reservation_size', sql`${t.size} > 0`),
     check('reservation_state', sql`${t.status} in ('reserved','completed','released','expired')`),
   ],
+);
+
+// PUT may finish after its signature expires, so these keys cannot be retired
+// merely because a delete succeeded. They are revisited by every cleanup cycle.
+export const deletedUploads = sqliteTable(
+  'deleted_uploads',
+  {
+    uploadKey: text('upload_key').primaryKey(),
+    checkedAt: integer('checked_at', { mode: 'timestamp_ms' }),
+  },
+  (t) => [index('deleted_uploads_checked').on(t.checkedAt)],
 );

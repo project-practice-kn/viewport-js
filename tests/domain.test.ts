@@ -1,4 +1,4 @@
-import { test, after } from 'node:test';
+import { test, after, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -348,4 +348,102 @@ test('Auth: invite нельзя обойти через API, лимитер об
     if (previous === undefined) delete process.env.REGISTRATION_INVITE_CODE;
     else process.env.REGISTRATION_INVITE_CODE = previous;
   }
+});
+
+test('Удаление draft: владелец, обработка, срок PUT, отказ S3 и повтор', async () => {
+  const empty = service.create('owner', form('Пустая'));
+  await assert.rejects(service.remove('other', empty), httpError(404));
+  await service.remove('owner', empty);
+  assert.throws(() => service.owned('owner', empty), httpError(404));
+
+  const id = service.create('other', form('Удаление'));
+  const [p] = uploads.reserve('other', id, [{ name: 'x.png', size: 1, type: 'image/png' }]);
+  const sql = database.$client;
+  sql.prepare("update photos set status='processing' where id=?").run(p.id);
+  await assert.rejects(service.remove('other', id), httpError(409));
+  sql
+    .prepare(
+      "update photos set status='ready',preview_key=?,width=1,height=1,preview_size=1 where id=?",
+    )
+    .run(p.originalKey.replace('/originals/', '/previews/') + '.webp', p.id);
+  sql.prepare("update upload_reservations set status='completed' where photo_id=?").run(p.id);
+  service.cover('other', id, p.id);
+  service.publish('other', id);
+  await assert.rejects(service.remove('other', id), httpError(409));
+  service.unpublish('other', id);
+  await assert.rejects(service.remove('other', id), httpError(409));
+  sql
+    .prepare('update upload_reservations set expires_at=? where photo_id=?')
+    .run(Date.now() - 1, p.id);
+
+  const { s3 } = await import('../src/lib/server/storage/index.ts');
+  let calls = 0;
+  const client = s3();
+  const stub = mock.method(client, 'send', (async () => {
+    if (++calls === 2) throw new Error('S3 недоступен');
+    return {};
+  }) as typeof client.send);
+  try {
+    await assert.rejects(service.remove('other', id), httpError(503));
+    assert.equal(service.owned('other', id, false, true).deleting, true);
+    assert.throws(() => service.publish('other', id), httpError(409));
+    assert.throws(
+      () => uploads.reserve('other', id, [{ name: 'x.png', size: 1, type: 'image/png' }]),
+      httpError(409),
+    );
+    assert.equal(
+      (sql.prepare('select count(*) as n from photos where gallery_id=?').get(id) as { n: number })
+        .n,
+      1,
+    );
+    await service.remove('other', id);
+    assert.equal(calls, 5);
+    assert.equal(
+      (sql.prepare('select count(*) as n from photos where gallery_id=?').get(id) as { n: number })
+        .n,
+      0,
+    );
+    assert.equal(
+      (
+        sql.prepare('select count(*) as n from upload_reservations where photo_id=?').get(p.id) as {
+          n: number;
+        }
+      ).n,
+      0,
+    );
+    assert.throws(() => service.owned('other', id), httpError(404));
+  } finally {
+    stub.mock.restore();
+  }
+});
+
+test('Форма удаления требует сессию, владельца и явное подтверждение', async () => {
+  const { actions } = await import('../src/routes/dashboard/galleries/[id]/+page.server.ts');
+  const id = service.create('owner', form('Форма удаления'));
+  const event = (actor: string | null, confirmed: boolean) =>
+    ({
+      locals: { user: actor ? { id: actor } : null },
+      params: { id },
+      request: new Request('http://localhost/dashboard', {
+        method: 'POST',
+        body: new URLSearchParams(confirmed ? { confirm: 'yes' } : {}),
+      }),
+    }) as unknown as Parameters<typeof actions.delete>[0];
+  await assert.rejects(
+    actions.delete(event(null, true)),
+    (e: unknown) => !!e && typeof e === 'object' && 'status' in e && e.status === 303,
+  );
+  assert.equal((await actions.delete(event('owner', false)))?.status, 400);
+  assert.equal((await actions.delete(event('other', true)))?.status, 404);
+  await assert.rejects(
+    actions.delete(event('owner', true)),
+    (e: unknown) =>
+      !!e &&
+      typeof e === 'object' &&
+      'status' in e &&
+      e.status === 303 &&
+      'location' in e &&
+      e.location === '/dashboard',
+  );
+  assert.throws(() => service.owned('owner', id), httpError(404));
 });

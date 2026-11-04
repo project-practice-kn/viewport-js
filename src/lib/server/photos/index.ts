@@ -1,9 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import sharp from 'sharp';
-import { and, eq, sql } from 'drizzle-orm';
+import { and, asc, eq, sql } from 'drizzle-orm';
 import { error } from '@sveltejs/kit';
 import { db, atomic } from '../db/index.ts';
-import { photos, reservations, galleries } from '../db/schema.ts';
+import { photos, reservations, galleries, deletedUploads } from '../db/schema.ts';
 import { owned } from '../galleries/index.ts';
 import { limit } from '../config.ts';
 import * as storage from '../storage/index.ts';
@@ -155,6 +155,58 @@ export async function createPreview(original: Buffer, expectedMime: string) {
 
 let processing = 0;
 const active = new Set<string>();
+
+// Called inside the deletion transaction after owner verification. An in-process
+// confirm retains its lease even after expiry until its finalizer has run.
+export function recoverExpiredProcessing(galleryId: string) {
+  const expired = db()
+    .select({ id: photos.id })
+    .from(photos)
+    .innerJoin(reservations, eq(reservations.photoId, photos.id))
+    .where(
+      and(
+        eq(photos.galleryId, galleryId),
+        eq(photos.status, 'processing'),
+        sql`${reservations.expiresAt} <= ${Date.now()}`,
+      ),
+    )
+    .all();
+  for (const { id } of expired) {
+    if (!active.has(id))
+      db()
+        .update(photos)
+        .set({ status: 'failed', updatedAt: new Date() })
+        .where(eq(photos.id, id))
+        .run();
+  }
+}
+
+// A PUT already in progress may recreate an object after any successful DELETE.
+// Keep tombstones indefinitely and rotate the oldest attempt to avoid starvation.
+export async function cleanupDeletedUploads(batchSize = 25) {
+  const candidates = db()
+    .select()
+    .from(deletedUploads)
+    .orderBy(asc(deletedUploads.checkedAt), asc(deletedUploads.uploadKey))
+    .limit(batchSize)
+    .all();
+  let cleaned = 0;
+  for (const { uploadKey } of candidates) {
+    try {
+      await storage.remove(uploadKey);
+      cleaned++;
+    } catch {
+      // Retry on a future cycle; failure must not lose the key.
+    } finally {
+      db()
+        .update(deletedUploads)
+        .set({ checkedAt: new Date() })
+        .where(eq(deletedUploads.uploadKey, uploadKey))
+        .run();
+    }
+  }
+  return cleaned;
+}
 export async function confirm(userId: string, photoId: string) {
   const { photo, reservation } = getPhoto(userId, photoId);
   owned(userId, photo.galleryId, true);
@@ -247,6 +299,7 @@ export function cancel(userId: string, photoId: string) {
   });
 }
 export async function cleanup(batchSize = 25) {
+  await cleanupDeletedUploads(batchSize);
   const candidates = db()
     .select({ photo: photos, reservation: reservations })
     .from(photos)
@@ -259,7 +312,8 @@ export async function cleanup(batchSize = 25) {
     if (active.has(photo.id)) continue;
     // Claim in a short transaction; a live confirm will fail its final CAS if its lease expired.
     const discard = atomic(() => {
-      const current = db().select().from(photos).where(eq(photos.id, photo.id)).get()!;
+      const current = db().select().from(photos).where(eq(photos.id, photo.id)).get();
+      if (!current) return null;
       if (current.status === 'ready') return false;
       db()
         .update(photos)
@@ -268,6 +322,7 @@ export async function cleanup(batchSize = 25) {
         .run();
       return true;
     });
+    if (discard === null) continue;
     try {
       await storage.remove(photo.uploadKey);
       if (discard) {

@@ -77,7 +77,11 @@
       ><span class="muted">{String(i + 1).padStart(2, '0')}</span>
       <h2>{gallery.title}</h2>
       <span class="badge" class:published={gallery.status === 'published'}
-        >{gallery.status === 'draft' ? 'Черновик' : 'Опубликована'}</span
+        >{gallery.deleting
+          ? 'Удаление не завершено'
+          : gallery.status === 'draft'
+            ? 'Черновик'
+            : 'Опубликована'}</span
       ><span aria-hidden="true">↗</span></a
     >{:else}<p class="empty">
       Здесь начнётся ваша первая история.<br />Создайте галерею и добавьте фотографии.

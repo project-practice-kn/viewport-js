@@ -1,10 +1,10 @@
-import { fail, isHttpError } from '@sveltejs/kit';
+import { fail, isHttpError, redirect } from '@sveltejs/kit';
 import { requireUser } from '#lib/server/auth/index.ts';
 import * as galleries from '#lib/server/galleries/index.ts';
 import { usage } from '#lib/server/photos/index.ts';
 export const load = async ({ locals, params, url }: import('./$types').PageServerLoadEvent) => {
   const user = requireUser(locals),
-    gallery = galleries.owned(user.id, params.id);
+    gallery = galleries.owned(user.id, params.id, false, true);
   return {
     gallery: {
       id: gallery.id,
@@ -12,10 +12,11 @@ export const load = async ({ locals, params, url }: import('./$types').PageServe
       description: gallery.description,
       theme: gallery.theme,
       status: gallery.status,
+      deleting: gallery.deleting,
       coverId: gallery.coverId,
       link: gallery.status === 'published' ? new URL(`/g/${gallery.token}`, url.origin).href : null,
     },
-    photos: await galleries.photoViews(gallery.id),
+    photos: gallery.deleting ? [] : await galleries.photoViews(gallery.id),
     usage: usage(user.id),
   };
 };
@@ -42,6 +43,19 @@ function action(
   };
 }
 export const actions = {
+  delete: async ({ locals, params, request }: Event) => {
+    const user = requireUser(locals);
+    const data = await request.formData();
+    if (data.get('confirm') !== 'yes')
+      return fail(400, { message: 'Подтвердите удаление галереи', success: false });
+    try {
+      await galleries.remove(user.id, params.id);
+    } catch (e) {
+      if (isHttpError(e)) return fail(e.status, { message: e.body.message, success: false });
+      throw e;
+    }
+    redirect(303, '/dashboard');
+  },
   save: action(galleries.edit, 'Настройки сохранены'),
   publish: action(galleries.publish, 'Галерея опубликована. Отправьте ссылку клиенту'),
   unpublish: action(galleries.unpublish, 'Публикация снята. Можно редактировать галерею'),
