@@ -2,6 +2,7 @@ import PhotoSwipeLightbox from 'photoswipe/lightbox';
 import 'photoswipe/style.css';
 
 export function photoViewer(grid: HTMLElement) {
+  const failedSlides = new Set<number>();
   const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
   let previousOverflow: string | undefined;
   const restoreScroll = () => {
@@ -69,11 +70,30 @@ export function photoViewer(grid: HTMLElement) {
     lightbox.pswp?.element?.setAttribute('aria-label', 'Просмотр фотографий');
     lightbox.pswp?.element?.setAttribute('aria-modal', 'true');
   });
+  lightbox.on('loadComplete', ({ isError, slide }) => {
+    if (!slide || grid.dataset.refreshable !== 'true') return;
+    const anchor = slide.data.element as HTMLElement | undefined;
+    const id = anchor?.dataset.photoId;
+    if (!id) return;
+    if (isError) failedSlides.add(slide.index);
+    grid.dispatchEvent(
+      new CustomEvent(isError ? 'preview-error' : 'preview-loaded', { bubbles: true, detail: id }),
+    );
+  });
+  const onRefreshed = () => {
+    const viewer = lightbox.pswp;
+    if (!viewer) return;
+    const indices = [...failedSlides];
+    failedSlides.clear();
+    for (const index of indices) viewer.refreshSlideContent(index);
+  };
+  grid.addEventListener('previews-refreshed', onRefreshed);
   lightbox.on('destroy', restoreScroll);
   lightbox.init();
   return {
     destroy() {
       lightbox.destroy();
+      grid.removeEventListener('previews-refreshed', onRefreshed);
       restoreScroll();
     },
   };

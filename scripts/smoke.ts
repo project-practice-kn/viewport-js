@@ -324,6 +324,29 @@ try {
   assert.ok(html.includes('Скачать оригинал'));
   assert.ok(!html.includes(a.email));
   assert.match(publicPage.headers.get('cache-control')!, /no-store/);
+  const refreshed = await req(`/g/${token}/previews`);
+  assert.equal(refreshed.status, 200);
+  assert.match(refreshed.headers.get('cache-control')!, /no-store/);
+  const refreshedPhotos = (await refreshed.json()).photos as { id: string; url: string }[];
+  assert.equal(refreshedPhotos.length, originals.length);
+  assert.ok(
+    refreshedPhotos.every(
+      (photo) => new URL(photo.url).searchParams.get('X-Amz-Expires') === '120',
+    ),
+  );
+  const retriedPreview = new URL(refreshedPhotos[0].url);
+  retriedPreview.hash = 'viewport-retry-1';
+  assert.ok((await fetch(retriedPreview)).ok, 'Повтор превью не меняет подпись S3');
+  const themeResponse = await req(
+    `/g/${token}?/theme`,
+    '',
+    new URLSearchParams({ theme: 'light' }),
+  );
+  assert.equal(themeResponse.status, 303);
+  const themeCookie = themeResponse.headers.getSetCookie()[0].split(';')[0];
+  const themedPage = await req(`/g/${token}`, themeCookie);
+  assert.equal(themedPage.status, 200);
+  assert.ok(!(await themedPage.text()).includes('public-gallery dark'));
   assert.equal(
     (await action(id, a.cookie, 'move', { photoId: originals[0].id, direction: 'down' })).status,
     409,
@@ -350,6 +373,8 @@ try {
   assert.equal((await req(`/api/downloads/${token}/${otherId}`)).status, 404);
   assert.equal((await action(id, a.cookie, 'unpublish')).status, 200);
   assert.equal((await req(`/g/${token}`)).status, 404);
+  assert.equal((await req(`/g/${token}/previews`)).status, 404);
+  assert.equal((await req('/g/unknown/previews')).status, 404);
   assert.equal((await req(`/api/downloads/${token}/${originals[0].id}`)).status, 404);
   assert.equal((await req(ownerDownload(id, originals[0].id), a.cookie)).status, 302);
   assert.equal((await req('/g/unknown')).status, 404);

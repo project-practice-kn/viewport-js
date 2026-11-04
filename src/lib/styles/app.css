@@ -567,6 +567,9 @@ fieldset {
 .feedback.success {
   border-color: #36533f;
 }
+.feedback a {
+  text-decoration: underline;
+}
 .public-gallery {
   padding: 20px 0;
 }
@@ -578,6 +581,13 @@ fieldset {
   --muted: #bec6b6;
   --line: #4a5549;
   --accent: #e1ad85;
+}
+.public-gallery.dark .feedback {
+  background: #36433a;
+  color: #f5f4ec;
+}
+.public-gallery.dark button:hover:not(:disabled) {
+  background: #46554a;
 }
 .story-heading {
   text-align: center;
