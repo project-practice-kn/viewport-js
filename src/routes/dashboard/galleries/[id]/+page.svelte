@@ -148,6 +148,10 @@
           bind:busy={uploading}
           disabled={pending !== null}
         />{/if}
+      {#if data.photos.length}<a
+          class="download-link"
+          href={`/api/galleries/${data.gallery.id}/archive`}>Скачать все фотографии ZIP ↓</a
+        >{/if}
       <div class="photo-grid editor-grid" data-downloads="true" use:photoViewer>
         {#each data.photos as photo, i (photo.id)}<article class="photo-item">
             <a

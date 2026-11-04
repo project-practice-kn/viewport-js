@@ -1,5 +1,9 @@
 import assert from 'node:assert/strict';
-import { randomUUID, createHash } from 'node:crypto';
+import { randomBytes, randomUUID, createHash } from 'node:crypto';
+import { get as httpGet } from 'node:http';
+import { GetObjectCommand } from '@aws-sdk/client-s3';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { writeFileSync } from 'node:fs';
 import sharp from 'sharp';
 import { eq, inArray } from 'drizzle-orm';
 import { db, atomic } from '../src/lib/server/db/index.ts';
@@ -11,7 +15,7 @@ import {
   photos,
   reservations,
 } from '../src/lib/server/db/schema.ts';
-import { remove, head, read, put, s3 } from '../src/lib/server/storage/index.ts';
+import { remove, head, read, put, s3, bucket } from '../src/lib/server/storage/index.ts';
 import { cleanup } from '../src/lib/server/photos/index.ts';
 const origin = process.env.SMOKE_ORIGIN || process.env.ORIGIN || 'http://localhost:5173';
 const password = randomUUID() + 'Aa1!';
@@ -45,6 +49,42 @@ async function req(
         : JSON.stringify(body)
       : undefined,
   });
+}
+async function checkArchive(path: string, cookie: string, expected: { data: Buffer }[]) {
+  const response = await req(path, cookie);
+  assert.equal(response.status, 200, 'Архив доступен');
+  assert.match(response.headers.get('content-type')!, /application\/zip/);
+  assert.match(response.headers.get('cache-control')!, /no-store/);
+  const zip = Buffer.from(await response.arrayBuffer());
+  if (process.env.SMOKE_ARCHIVE_PATH) writeFileSync(process.env.SMOKE_ARCHIVE_PATH, zip);
+  const end64 = zip.lastIndexOf(Buffer.from([0x50, 0x4b, 0x06, 0x06]));
+  assert.ok(end64 >= 0, 'ZIP64 каталог присутствует');
+  const count = Number(zip.readBigUInt64LE(end64 + 32));
+  let offset = Number(zip.readBigUInt64LE(end64 + 48));
+  assert.equal(count, expected.length);
+  const hashes: string[] = [];
+  const names: string[] = [];
+  for (let i = 0; i < count; i++) {
+    assert.equal(zip.readUInt32LE(offset), 0x02014b50);
+    assert.equal(zip.readUInt16LE(offset + 10), 0, 'Оригинал без перекодирования');
+    const size = zip.readUInt32LE(offset + 24);
+    const nameLength = zip.readUInt16LE(offset + 28);
+    const extraLength = zip.readUInt16LE(offset + 30);
+    const commentLength = zip.readUInt16LE(offset + 32);
+    const local = zip.readUInt32LE(offset + 42);
+    names.push(zip.subarray(offset + 46, offset + 46 + nameLength).toString());
+    assert.equal(zip.readUInt32LE(local), 0x04034b50);
+    const start = local + 30 + zip.readUInt16LE(local + 26) + zip.readUInt16LE(local + 28);
+    hashes.push(hash(zip.subarray(start, start + size)));
+    offset += 46 + nameLength + extraLength + commentLength;
+  }
+  assert.deepEqual(
+    hashes.sort(),
+    expected.map((item) => hash(item.data)).sort(),
+    'Байты оригиналов в ZIP',
+  );
+  assert.equal(new Set(names).size, expected.length);
+  assert.ok(names.every((name) => !name.includes('/') && !name.includes('\\')));
 }
 async function register() {
   const response = await req('/api/auth/sign-up/email', '', {
@@ -214,6 +254,10 @@ try {
   assert.equal((await req(ownerDownload(id, originals[0].id), b.cookie)).status, 404);
   assert.equal((await req(ownerDownload(id, originals[0].id))).status, 303);
   assert.equal((await req(ownerDownload(id, randomUUID()), a.cookie)).status, 404);
+  const ownerArchive = `/api/galleries/${id}/archive`;
+  await checkArchive(ownerArchive, a.cookie, originals);
+  assert.equal((await req(ownerArchive, b.cookie)).status, 404);
+  assert.equal((await req(ownerArchive)).status, 303);
   // Two independent HTTP requests compete for the last 100 bytes in real SQLite.
   const quotaGallery = await create(b.cookie, 'Гонка квоты');
   const held = await reserve(quotaGallery, b.cookie, Buffer.alloc(1), 'hold.png', 'image/png');
@@ -314,14 +358,125 @@ try {
     (await action(id, a.cookie, 'move', { photoId: originals[1].id, direction: 'up' })).status,
     200,
   );
-  assert.equal((await action(id, a.cookie, 'publish')).status, 200);
+  const racingData = await input.clone().png().toBuffer();
+  const racing = await reserve(id, a.cookie, racingData, 'гонка.png', 'image/png');
+  assert.ok(
+    (await fetch(racing.url, { method: 'PUT', headers: racing.requiredHeaders, body: racingData }))
+      .ok,
+  );
+  const [confirmed, published] = await Promise.all([
+    req('/api/uploads/confirm', a.cookie, { photoId: racing.id }),
+    action(id, a.cookie, 'publish'),
+  ]);
+  assert.equal(confirmed.status, 200);
+  assert.ok([200, 409].includes(published.status));
+  assert.equal(db().select().from(photos).where(eq(photos.id, racing.id)).get()!.status, 'ready');
+  if (published.status === 409) assert.equal((await action(id, a.cookie, 'publish')).status, 200);
+  originals.push({ id: racing.id, data: racingData });
   const gallery = db().select().from(galleries).where(eq(galleries.id, id)).get()!;
   const token = gallery.token!;
+  const expiring = db().select().from(photos).where(eq(photos.id, originals[0].id)).get()!;
+  const expiredUrl = await getSignedUrl(
+    s3(),
+    new GetObjectCommand({ Bucket: bucket(), Key: expiring.originalKey }),
+    {
+      expiresIn: 1,
+      signingDate: new Date(Date.now() - 120000),
+    },
+  );
+  assert.equal((await fetch(expiredUrl)).status, 403, 'Просроченная подпись S3 отклонена');
+  const [racingArchive, racingUnpublish] = await Promise.all([
+    req(`/api/downloads/${token}/archive`),
+    action(id, a.cookie, 'unpublish'),
+  ]);
+  assert.equal(racingUnpublish.status, 200);
+  assert.ok([200, 404].includes(racingArchive.status));
+  if (racingArchive.status === 200) {
+    const zip = Buffer.from(await racingArchive.arrayBuffer());
+    assert.ok(zip.lastIndexOf(Buffer.from([0x50, 0x4b, 0x06, 0x06])) > 0);
+  }
+  assert.equal((await req(`/api/downloads/${token}/archive`)).status, 404);
+  assert.equal((await action(id, a.cookie, 'publish')).status, 200);
+  await checkArchive(`/api/downloads/${token}/archive`, '', originals);
+  await checkArchive(ownerArchive, a.cookie, originals);
+  if (process.env.SMOKE_LARGE_ARCHIVE === '1') {
+    // Hold real HTTP responses open to exercise backpressure, the shared limit and TCP disconnects.
+    const largePhoto = db().select().from(photos).where(eq(photos.id, originals[1].id)).get()!;
+    const large = randomBytes(8 * 1024 * 1024);
+    try {
+      await put(largePhoto.originalKey, large, largePhoto.mime);
+      db().$client.prepare('update photos set size=? where id=?').run(large.length, largePhoto.id);
+      const controllers = Array.from({ length: 3 }, () => new AbortController());
+      try {
+        const held = await Promise.all(
+          controllers.map((controller) =>
+            fetch(new URL(`/api/downloads/${token}/archive`, origin), {
+              signal: controller.signal,
+            }),
+          ),
+        );
+        assert.ok(
+          held.every((response) => response.status === 200),
+          'Три медленных ZIP',
+        );
+        assert.equal((await req(`/api/downloads/${token}/archive`)).status, 429, 'Лимит ZIP');
+      } finally {
+        controllers.forEach((controller) => controller.abort());
+      }
+      async function waitForSlot() {
+        for (let i = 0; i < 100; i++) {
+          const controller = new AbortController();
+          const response = await fetch(new URL(`/api/downloads/${token}/archive`, origin), {
+            signal: controller.signal,
+          });
+          controller.abort();
+          if (response.status === 200) return;
+          assert.equal(response.status, 429);
+          await new Promise((resolve) => setTimeout(resolve, 30));
+        }
+        throw new Error('Слот ZIP не освобождён');
+      }
+      await waitForSlot();
+      await new Promise<void>((resolve, reject) => {
+        const request = httpGet(new URL(`/api/downloads/${token}/archive`, origin), (response) => {
+          if (response.statusCode !== 200) {
+            reject(new Error('ZIP после отмены недоступен'));
+            response.destroy();
+            return;
+          }
+          response.once('data', () => {
+            response.destroy();
+            request.destroy();
+            resolve();
+          });
+        });
+        request.once('error', reject);
+      });
+      await waitForSlot();
+      const continuing = await req(`/api/downloads/${token}/archive`);
+      assert.equal(continuing.status, 200);
+      assert.equal((await action(id, a.cookie, 'unpublish')).status, 200);
+      assert.equal((await req(`/api/downloads/${token}/archive`)).status, 404);
+      assert.equal((await action(id, a.cookie, 'delete', { confirm: 'yes' })).status, 409);
+      const completedZip = Buffer.from(await continuing.arrayBuffer());
+      assert.ok(
+        completedZip.lastIndexOf(Buffer.from([0x50, 0x4b, 0x06, 0x06])) > 0,
+        'ZIP завершён после unpublish',
+      );
+      assert.equal((await action(id, a.cookie, 'publish')).status, 200);
+    } finally {
+      await put(largePhoto.originalKey, originals[1].data, largePhoto.mime);
+      db()
+        .$client.prepare('update photos set size=? where id=?')
+        .run(largePhoto.size, largePhoto.id);
+    }
+  }
   const publicPage = await req(`/g/${token}`);
   assert.equal(publicPage.status, 200);
   const html = await publicPage.text();
   assert.match(html, /Checkpoint &lt;история(?:&gt;|>)/);
   assert.ok(html.includes('Скачать оригинал'));
+  assert.ok(html.includes('Скачать все фотографии ZIP'));
   assert.ok(!html.includes(a.email));
   assert.match(publicPage.headers.get('cache-control')!, /no-store/);
   const refreshed = await req(`/g/${token}/previews`);
@@ -373,6 +528,8 @@ try {
   assert.equal((await req(`/api/downloads/${token}/${otherId}`)).status, 404);
   assert.equal((await action(id, a.cookie, 'unpublish')).status, 200);
   assert.equal((await req(`/g/${token}`)).status, 404);
+  assert.equal((await req(`/api/downloads/${token}/archive`)).status, 404);
+  await checkArchive(ownerArchive, a.cookie, originals);
   assert.equal((await req(`/g/${token}/previews`)).status, 404);
   assert.equal((await req('/g/unknown/previews')).status, 404);
   assert.equal((await req(`/api/downloads/${token}/${originals[0].id}`)).status, 404);
@@ -439,7 +596,7 @@ try {
     'API делит лимитер с HTML-формой',
   );
   console.log(
-    'Smoke: invite, общий rate limit HTML/API, S3 ограничивает размер PUT; auth → галерея → Sharp → публикация → оригиналы JPEG/PNG/WebP; права, повторы, CORS, приватность, hash, unpublish, cleanup — OK.',
+    'Smoke: invite, общий rate limit HTML/API, S3 ограничивает размер PUT; auth → галерея → Sharp → публикация → оригиналы JPEG/PNG/WebP и ZIP; права, конкурентные операции, просроченная подпись, CORS, hash, unpublish, cleanup — OK.',
   );
 } finally {
   // Delete only test owners and their server-generated keys; never touch demonstration data.
