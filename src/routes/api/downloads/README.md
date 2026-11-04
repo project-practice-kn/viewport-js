@@ -1,5 +1,3 @@
-# Endpoints скачивания
+# Скачивание оригинала
 
-Будущие GET handlers оригинала и ZIP. Каждый запрос проверяет публичный токен, published и принадлежность фото галерее.
-
-Контракты и критерии: [EP06](../../../../tasks/epics/EP06-downloads.md).
+GET `/api/downloads/{token}/{photoId}` вызывает [download](../../../lib/server/galleries/index.ts), проверяющий публикацию, токен, ready и принадлежность фото. Ответ перенаправляет на короткоживущий S3 GET с безопасным Content-Disposition; внешний redirect разрешён только для настроенного публичного S3 origin.

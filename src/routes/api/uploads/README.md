@@ -1,5 +1,3 @@
-# Endpoints загрузки
+# API загрузки
 
-Будущие POST handlers: резервирование/presign и подтверждение загрузки. Используют серверные модули photos/storage и проверяют сессию, владельца и draft на каждой операции.
-
-Контракты и критерии: [EP03](../../../../tasks/epics/EP03-uploads.md).
+POST `/api/uploads/presign` принимает galleryId и метаданные files; `/confirm` и `/cancel` — photoId. Маршрут проверяет сессию, JSON и вызывает [сервис фотографий](../../../lib/server/photos/index.ts). Сервис проверяет владельца, draft, TTL и квоту. Cookie-запросы дополнительно защищены проверкой Origin в hook.

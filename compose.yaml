@@ -1,13 +1,45 @@
+x-app: &app
+  image: viewport-checkpoint:local
+  build:
+    context: .
+    args:
+      ORIGIN: ${ORIGIN:-http://localhost:5173}
+  init: true
+  env_file: .env
+  environment: &app-environment
+    ORIGIN: ${ORIGIN:-http://localhost:5173}
+    DATABASE_PATH: /app/data/viewport.db
+    S3_ENDPOINT: http://s3:8333
+    S3_PUBLIC_ENDPOINT: ${S3_PUBLIC_ENDPOINT:-http://localhost:8333}
+  volumes:
+    - app-data:/app/data
+
 services:
   app:
-    build: .
-    init: true
+    <<: *app
+    restart: unless-stopped
     ports:
-      - '127.0.0.1:3000:3000'
+      - '127.0.0.1:5173:3000'
+    depends_on:
+      s3:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 20s
 
   s3:
     image: chrislusf/seaweedfs:4.48
-    command: ['mini', '-dir=/data']
+    command: ['mini', '-dir=/data', '-ip=s3', '-volume.max=3', '-admin.ui=false', '-webdav=false']
+    restart: unless-stopped
     ports:
       - '127.0.0.1:8333:8333'
     environment:
@@ -20,8 +52,19 @@ services:
       test: ['CMD', 'wget', '-q', '-O', '/dev/null', 'http://127.0.0.1:8333/status']
       interval: 5s
       timeout: 3s
-      retries: 12
+      retries: 20
       start_period: 10s
 
+  # Linux: use host networking to test the same public URLs as a real browser.
+  smoke:
+    <<: *app
+    profiles: ['tools']
+    network_mode: host
+    environment:
+      <<: *app-environment
+      S3_ENDPOINT: ${S3_PUBLIC_ENDPOINT:-http://localhost:8333}
+    command: ['node', 'scripts/smoke.ts']
+
 volumes:
+  app-data:
   s3-data:
