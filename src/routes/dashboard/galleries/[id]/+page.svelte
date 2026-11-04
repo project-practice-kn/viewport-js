@@ -3,6 +3,7 @@
   import PhotoUploader from '#lib/components/PhotoUploader.svelte';
   import ShareLink from '#lib/components/ShareLink.svelte';
   import { formatPhotos } from '#lib/format.ts';
+  import { photoViewer } from '#lib/photoViewer.ts';
   import { enhance, type SubmitFunction } from '$app/forms';
   import { invalidateAll } from '$app/navigation';
   import { untrack } from 'svelte';
@@ -147,20 +148,36 @@
           bind:busy={uploading}
           disabled={pending !== null}
         />{/if}
-      <div class="photo-grid editor-grid">
+      <div class="photo-grid editor-grid" data-downloads="true" use:photoViewer>
         {#each data.photos as photo, i (photo.id)}<article class="photo-item">
-            <img
-              src={photo.url}
-              alt={photo.filename}
-              width={photo.width}
-              height={photo.height}
-              loading="lazy"
-            />
+            <a
+              class="photo-preview"
+              href={photo.url}
+              target="_blank"
+              rel="noreferrer"
+              data-filename={photo.filename}
+              data-download={`/api/galleries/${data.gallery.id}/photos/${photo.id}/download`}
+              data-pswp-width={photo.width}
+              data-pswp-height={photo.height}
+              aria-label={`Посмотреть ${photo.filename}`}
+              ><img
+                src={photo.url}
+                alt={photo.filename}
+                width={photo.width}
+                height={photo.height}
+                loading="lazy"
+              /></a
+            >
             <div class="photo-caption">
               <span>{photo.filename}</span>{#if photo.id === data.gallery.coverId}<span
                   class="badge">Обложка</span
                 >{/if}
             </div>
+            <a
+              class="download-link"
+              href={`/api/galleries/${data.gallery.id}/photos/${photo.id}/download`}
+              aria-label={`Скачать оригинал ${photo.filename}`}>Скачать оригинал ↓</a
+            >
             {#if data.gallery.status === 'draft'}<div class="photo-actions">
                 <form method="POST" action="?/cover" use:enhance={submit}>
                   <input type="hidden" name="photoId" value={photo.id} /><button

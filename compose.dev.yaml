@@ -1,0 +1,15 @@
+services:
+  app:
+    image: viewport-dev:local
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    environment:
+      NODE_ENV: development
+    volumes:
+      - ./src:/app/src:ro
+      - ./static:/app/static:ro
+      - ./scripts:/app/scripts:ro
+      - ./drizzle:/app/drizzle:ro
+      - ./vite.config.ts:/app/vite.config.ts:ro
+      - ./tsconfig.json:/app/tsconfig.json:ro
