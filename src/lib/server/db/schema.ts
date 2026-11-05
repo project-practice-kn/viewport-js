@@ -73,6 +73,7 @@ export const galleries = sqliteTable(
     deleting: integer('deleting', { mode: 'boolean' }).notNull().default(false),
     token: text('token').unique(),
     coverId: text('cover_id'),
+    coverSelected: integer('cover_selected', { mode: 'boolean' }).notNull().default(false),
     createdAt: date('created_at'),
     updatedAt: date('updated_at'),
   },
@@ -104,6 +105,7 @@ export const photos = sqliteTable(
     width: integer('width'),
     height: integer('height'),
     position: integer('position').notNull().default(0),
+    deleting: integer('deleting', { mode: 'boolean' }).notNull().default(false),
     status: text('status', { enum: ['pending', 'processing', 'ready', 'failed'] })
       .notNull()
       .default('pending'),

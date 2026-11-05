@@ -10,6 +10,10 @@ export const load = async ({ params, cookies }: import('./$types').PageServerLoa
     coverId: gallery.coverId,
     token: params.token,
     photos: await photoViews(gallery.id),
+    previewsHref: `/g/${params.token}/previews`,
+    pageHref: `/g/${params.token}`,
+    downloadBase: `/api/downloads/${params.token}`,
+    archiveHref: `/api/downloads/${params.token}/archive`,
   };
 };
 export const actions = {

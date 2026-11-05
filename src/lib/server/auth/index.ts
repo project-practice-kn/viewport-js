@@ -6,6 +6,8 @@ import { db } from '../db/index.ts';
 import * as schema from '../db/schema.ts';
 import { origin, setting } from '../config.ts';
 import { assertInviteCode } from './invite.ts';
+import { safeReturnTo } from '#lib/authReturn.ts';
+import { deliverRecoveryLink } from './recovery.ts';
 let instance: ReturnType<typeof createAuth> | undefined;
 export const auth = () => (instance ??= createAuth());
 function createAuth() {
@@ -16,7 +18,14 @@ function createAuth() {
     baseURL: origin(),
     secret,
     database: drizzleAdapter(db(), { provider: 'sqlite', schema }),
-    emailAndPassword: { enabled: true, minPasswordLength: 10, maxPasswordLength: 128 },
+    emailAndPassword: {
+      enabled: true,
+      minPasswordLength: 10,
+      maxPasswordLength: 128,
+      resetPasswordTokenExpiresIn: 1800,
+      revokeSessionsOnPasswordReset: true,
+      sendResetPassword: async ({ url }) => deliverRecoveryLink(url),
+    },
     session: { expiresIn: 60 * 60 * 24 * 7, cookieCache: { enabled: false } },
     rateLimit: { enabled: true, window: 60, max: 60 },
     advanced: {
@@ -40,7 +49,13 @@ export async function handleAuthRequest(request: Request, clientAddress: string)
     response.headers.set('Retry-After', response.headers.get('X-Retry-After') || '10');
   return response;
 }
-export function requireUser(locals: App.Locals) {
-  if (!locals.user) redirect(303, '/login');
+export function requireUser(locals: App.Locals, url?: URL) {
+  if (!locals.user)
+    redirect(
+      303,
+      url
+        ? `/login?returnTo=${encodeURIComponent(safeReturnTo(url.pathname + url.search))}`
+        : '/login',
+    );
   return locals.user;
 }

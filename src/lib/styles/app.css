@@ -525,6 +525,34 @@ fieldset {
   gap: 30px 20px;
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
+.gallery-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 16px;
+  margin-bottom: 24px;
+}
+.gallery-filters label {
+  flex: 1 1 180px;
+  margin: 0;
+}
+.gallery-filters select {
+  flex: 1 1 180px;
+  width: auto;
+}
+.gallery-card {
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 20px;
+}
+.gallery-card .gallery-row {
+  border-bottom: 0;
+}
+.archive-panel {
+  margin: 16px 0 24px;
+}
+.archive-panel p {
+  margin: 8px 0;
+}
 .photo-item img {
   display: block;
   width: 100%;

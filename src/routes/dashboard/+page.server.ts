@@ -2,9 +2,21 @@ import { fail, isHttpError, redirect } from '@sveltejs/kit';
 import { requireUser } from '#lib/server/auth/index.ts';
 import { list, create } from '#lib/server/galleries/index.ts';
 import { usage } from '#lib/server/photos/index.ts';
-export const load = ({ locals }: import('./$types').PageServerLoadEvent) => {
-  const user = requireUser(locals);
-  return { user, galleries: list(user.id), usage: usage(user.id) };
+export const load = ({ locals, url }: import('./$types').PageServerLoadEvent) => {
+  const user = requireUser(locals, url);
+  const query = (url.searchParams.get('q') ?? '').trim().slice(0, 120),
+    status = url.searchParams.get('status') ?? '';
+  return {
+    user,
+    query,
+    status,
+    galleries: list(user.id, query, status).map((g) => ({
+      ...g,
+      link: g.status === 'published' ? new URL(`/g/${g.token}`, url.origin).href : null,
+      token: undefined,
+    })),
+    usage: usage(user.id),
+  };
 };
 export const actions = {
   default: async ({ locals, request }: import('./$types').RequestEvent) => {

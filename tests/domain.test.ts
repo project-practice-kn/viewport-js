@@ -797,3 +797,347 @@ test('Конкурентный lifecycle: confirm, публикация, ZIP, un
     process.env.USER_STORAGE_QUOTA_BYTES = previousQuota;
   }
 });
+
+test('GOAL: удаление выбранных фото с отказом S3, квотой, обложкой и поздним PUT', async () => {
+  const id = service.create('other', form('Удаление выбранных'));
+  const batch = uploads.reserve('other', id, [
+    { name: 'a.png', size: 1, type: 'image/png' },
+    { name: 'b.png', size: 1, type: 'image/png' },
+    { name: 'c.png', size: 1, type: 'image/png' },
+  ]);
+  for (const p of batch) {
+    database.$client
+      .prepare(
+        "update photos set status='ready',preview_key=?,width=1,height=1,preview_size=1 where id=?",
+      )
+      .run(p.id + '.webp', p.id);
+    database.$client
+      .prepare("update upload_reservations set status='completed' where photo_id=?")
+      .run(p.id);
+  }
+  service.cover('other', id, batch[0].id);
+  await assert.rejects(service.removePhotos('owner', id, [batch[0].id]), httpError(404));
+  await assert.rejects(service.removePhotos('other', id, [batch[0].id, 'foreign']), httpError(404));
+  const storage = await import('../src/lib/server/storage/index.ts');
+  const client = storage.s3();
+  const initial = uploads.usage('other').used;
+  let fail = true;
+  const calls: string[] = [];
+  const stub = mock.method(client, 'send', (async (command: { input: { Key?: string } }) => {
+    calls.push(command.input.Key ?? '');
+    if (fail) throw new Error('S3 failure');
+    return {};
+  }) as typeof client.send);
+  try {
+    await assert.rejects(service.removePhotos('other', id, [batch[0].id]), httpError(503));
+    assert.equal(service.readyPhotos(id).length, 2);
+    assert.equal(service.owned('other', id).coverId, batch[1].id);
+    assert.equal(uploads.usage('other').used, initial);
+    assert.equal(service.deletingPhotos('other', id).length, 1);
+    assert.throws(() => service.publish('other', id), httpError(409));
+    fail = false;
+    await service.removePhotos('other', id, [batch[0].id]);
+    assert.equal(uploads.usage('other').used, initial - 1);
+    assert.ok(
+      database.$client
+        .prepare('select upload_key from deleted_uploads where upload_key=?')
+        .get(batch[0].uploadKey),
+    );
+    assert.ok(calls.includes(batch[0].originalKey));
+    await service.removePhotos('other', id, [batch[1].id, batch[2].id]);
+    assert.equal(service.owned('other', id).coverId, null);
+    assert.equal(service.readyPhotos(id).length, 0);
+  } finally {
+    stub.mock.restore();
+  }
+});
+
+test('GOAL: порядок выбранных файлов, сортировка, массовое перемещение и отзыв ссылки', () => {
+  const id = service.create('other', form('Поиск Альбом'));
+  const batch = uploads.reserve('other', id, [
+    { name: '10.png', size: 1, type: 'image/png' },
+    { name: '2.png', size: 1, type: 'image/png' },
+    { name: '1.png', size: 1, type: 'image/png' },
+  ]);
+  assert.deepEqual(
+    batch.map((p) => p.position),
+    [0, 1, 2],
+  );
+  for (const p of [...batch].reverse()) {
+    database.$client
+      .prepare(
+        "update photos set status='ready',preview_key=?,width=1,height=1,preview_size=1 where id=?",
+      )
+      .run(p.id + '.webp', p.id);
+    database.$client
+      .prepare("update upload_reservations set status='completed' where photo_id=?")
+      .run(p.id);
+  }
+  assert.deepEqual(
+    service.readyPhotos(id).map((p) => p.id),
+    batch.map((p) => p.id),
+  );
+  service.cover('other', id, batch[0].id);
+  service.sortByName('other', id);
+  assert.deepEqual(
+    service.readyPhotos(id).map((p) => p.filename),
+    ['1.png', '2.png', '10.png'],
+  );
+  service.moveMany('other', id, [batch[0].id, batch[1].id], 'start');
+  assert.deepEqual(
+    service.readyPhotos(id).map((p) => p.filename),
+    ['2.png', '10.png', '1.png'],
+  );
+  assert.throws(() => service.moveMany('owner', id, [batch[0].id], 'end'), httpError(404));
+  assert.throws(() => service.moveMany('other', id, ['foreign'], 'end'), httpError(400));
+  const token = service.publish('other', id)!;
+  const next = service.rotateLink('other', id);
+  assert.notEqual(next, token);
+  assert.throws(() => service.publicGallery(token), httpError(404));
+  assert.equal(service.publicGallery(next).id, id);
+  assert.throws(() => service.rotateLink('owner', id), httpError(404));
+  assert.equal(service.list('other', 'Поиск', 'published')[0].photoCount, 3);
+  assert.equal(service.list('owner', 'Поиск', 'published').length, 0);
+  service.unpublish('other', id);
+  assert.throws(() => service.rotateLink('other', id), httpError(409));
+  database.$client
+    .prepare(
+      "update upload_reservations set status='released' where photo_id in (select id from photos where gallery_id=?)",
+    )
+    .run(id);
+});
+
+test('GOAL: возврат после входа разрешает только внутренние страницы кабинета', async () => {
+  const { safeReturnTo } = await import('../src/lib/authReturn.ts');
+  for (const value of [
+    'https://evil.invalid',
+    '//evil.invalid',
+    '/dashboard-evil',
+    '/dashboard\\evil',
+    '/dashboard\nfoo',
+    '/login',
+  ])
+    assert.equal(safeReturnTo(value), '/dashboard');
+  assert.equal(
+    safeReturnTo('/dashboard/galleries/example?mode=preview'),
+    '/dashboard/galleries/example?mode=preview',
+  );
+});
+
+test('GOAL: незавершённые загрузки доступны владельцу, истёкшие очищаются без новой загрузки', async () => {
+  const id = service.create('other', form('Восстановление загрузки'));
+  const [p] = uploads.reserve('other', id, [{ name: 'pending.png', size: 1, type: 'image/png' }]);
+  assert.equal(uploads.unfinished('other', id)[0].canConfirm, true);
+  assert.throws(() => uploads.unfinished('owner', id), httpError(404));
+  const other = service.create('other', form('Другая'));
+  assert.throws(() => uploads.assertUploadGallery('other', other, p.id), httpError(404));
+  database.$client
+    .prepare('update upload_reservations set expires_at=? where photo_id=?')
+    .run(Date.now() - 1, p.id);
+  const storage = await import('../src/lib/server/storage/index.ts');
+  const client = storage.s3();
+  const stub = mock.method(client, 'send', (async () => ({})) as typeof client.send);
+  try {
+    const pending = await uploads.refreshGalleryUploads('other', id);
+    assert.equal(pending[0].status, 'failed');
+    assert.equal(pending[0].reservationStatus, 'expired');
+    assert.equal(pending[0].canConfirm, false);
+  } finally {
+    stub.mock.restore();
+  }
+});
+
+test('GOAL: смена пароля и одноразовое восстановление с отзывом сессий', async () => {
+  const { handleAuthRequest } = await import('../src/lib/server/auth/index.ts');
+  const { readFileSync, statSync } = await import('node:fs');
+  const previous = process.env.REGISTRATION_INVITE_CODE;
+  process.env.REGISTRATION_INVITE_CODE = randomUUID();
+  const email = `${randomUUID()}@test.invalid`,
+    password = randomUUID(),
+    next = randomUUID(),
+    final = randomUUID();
+  const address = randomUUID();
+  let cookie = '';
+  const api = async (path: string, body: unknown) =>
+    handleAuthRequest(
+      new Request(`http://localhost:5173/api/auth/${path}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Origin: 'http://localhost:5173',
+          ...(cookie ? { Cookie: cookie } : {}),
+        },
+        body: JSON.stringify(body),
+      }),
+      address,
+    );
+  try {
+    const signup = await api('sign-up/email', {
+      name: 'Recovery test',
+      email,
+      password,
+      inviteCode: process.env.REGISTRATION_INVITE_CODE,
+    });
+    assert.equal(signup.status, 200);
+    cookie = signup.headers
+      .getSetCookie()
+      .map((c) => c.split(';')[0])
+      .join('; ');
+    const wrong = await api('change-password', {
+      currentPassword: 'wrong-password',
+      newPassword: next,
+      revokeOtherSessions: false,
+    });
+    assert.equal(wrong.status, 400);
+    const changed = await api('change-password', {
+      currentPassword: password,
+      newPassword: next,
+      revokeOtherSessions: false,
+    });
+    assert.equal(changed.status, 200);
+    cookie = '';
+    const stale = await api('sign-in/email', { email, password });
+    assert.equal(stale.status, 401);
+    const login = await api('sign-in/email', { email, password: next });
+    assert.equal(login.status, 200);
+    cookie = login.headers
+      .getSetCookie()
+      .map((c) => c.split(';')[0])
+      .join('; ');
+    const destination = join(folder, 'recovery.html');
+    process.env.RECOVERY_LINK_FILE = destination;
+    const authModule = await import('../src/lib/server/auth/index.ts');
+    await authModule.auth().api.requestPasswordReset({
+      body: { email, redirectTo: 'http://localhost:5173/reset-password' },
+    });
+    assert.equal(statSync(destination).mode & 0o777, 0o600);
+    const html = readFileSync(destination, 'utf8');
+    const link = html.match(/href="([^"]+)"/)![1].replace(/&amp;/g, '&');
+    const token = new URL(link).pathname.split('/').at(-1)!;
+    assert.equal((await api('reset-password', { token, newPassword: final })).status, 200);
+    assert.equal((await api('reset-password', { token, newPassword: next })).status, 400);
+    const session = await authModule
+      .auth()
+      .api.getSession({ headers: new Headers({ Cookie: cookie }) });
+    assert.equal(session, null);
+    cookie = '';
+    const fresh = await api('sign-in/email', { email, password: final });
+    assert.equal(fresh.status, 200);
+  } finally {
+    delete process.env.RECOVERY_LINK_FILE;
+    if (previous === undefined) delete process.env.REGISTRATION_INVITE_CODE;
+    else process.env.REGISTRATION_INVITE_CODE = previous;
+  }
+});
+
+test('GOAL: удаление выбранных снимков блокирует активный ZIP и published', async () => {
+  const id = service.create('other', form('Архив и удаление'));
+  const [p] = uploads.reserve('other', id, [{ name: 'x.png', size: 1, type: 'image/png' }]);
+  database.$client
+    .prepare(
+      "update photos set status='ready',preview_key=?,width=1,height=1,preview_size=1 where id=?",
+    )
+    .run(p.id + '.webp', p.id);
+  database.$client
+    .prepare("update upload_reservations set status='completed' where photo_id=?")
+    .run(p.id);
+  service.cover('other', id, p.id);
+  const { acquireArchive } = await import('../src/lib/server/downloads/active.ts');
+  const release = acquireArchive(id, 3)!;
+  await assert.rejects(service.removePhotos('other', id, [p.id]), httpError(409));
+  release();
+  service.publish('other', id);
+  await assert.rejects(service.removePhotos('other', id, [p.id]), httpError(409));
+  service.unpublish('other', id);
+});
+
+test('GOAL: формы удаления и смены ссылки проверяют подтверждение и владельца', async () => {
+  const id = service.create('other', form('Подтверждение действий'));
+  const { actions } = await import('../src/routes/dashboard/galleries/[id]/+page.server.ts');
+  const event = (who: string | null, confirm: boolean) =>
+    ({
+      locals: { user: who ? { id: who, name: who } : null },
+      params: { id },
+      request: {
+        formData: async () => {
+          const d = new FormData();
+          d.set('selected', 'foreign');
+          if (confirm) {
+            d.set('confirmPhotos', 'yes');
+            d.set('confirmLink', 'yes');
+          }
+          return d;
+        },
+      },
+    }) as unknown as Parameters<typeof actions.removePhotos>[0];
+  {
+    const result = await actions.removePhotos(event('other', false));
+    assert.ok('status' in result);
+    assert.equal(result.status, 400);
+  }
+  {
+    const result = await actions.removePhotos(event('owner', true));
+    assert.ok('status' in result);
+    assert.equal(result.status, 404);
+  }
+  {
+    const result = await actions.rotateLink(event('other', false));
+    assert.ok('status' in result);
+    assert.equal(result.status, 400);
+  }
+  {
+    const result = await actions.rotateLink(event('owner', true));
+    assert.ok('status' in result);
+    assert.equal(result.status, 404);
+  }
+  await assert.rejects(
+    actions.removePhotos(event(null, true)),
+    (e: unknown) => !!e && typeof e === 'object' && 'status' in e && e.status === 303,
+  );
+});
+
+test('GOAL: confirm вне порядка выбора сохраняет позиции и автоматическую обложку', async () => {
+  const quota = process.env.USER_STORAGE_QUOTA_BYTES;
+  process.env.USER_STORAGE_QUOTA_BYTES = '1000000';
+  const buffer = await sharp({ create: { width: 10, height: 10, channels: 3, background: 'red' } })
+    .png()
+    .toBuffer();
+  const storage = await import('../src/lib/server/storage/index.ts');
+  const client = storage.s3();
+  const stub = mock.method(client, 'send', (async (command: { constructor: { name: string } }) => {
+    if (command.constructor.name === 'HeadObjectCommand') return { ContentLength: buffer.length };
+    if (command.constructor.name === 'GetObjectCommand')
+      return {
+        ContentLength: buffer.length,
+        Body: (await import('node:stream')).Readable.from([buffer]),
+      };
+    return {};
+  }) as typeof client.send);
+  try {
+    const id = service.create('other', form('Порядок confirm'));
+    const batch = uploads.reserve(
+      'other',
+      id,
+      Array.from({ length: 3 }, (_, i) => ({
+        name: i + '.png',
+        size: buffer.length,
+        type: 'image/png',
+      })),
+    );
+    await uploads.confirm('other', batch[2].id);
+    assert.equal(service.owned('other', id).coverId, batch[2].id);
+    await uploads.confirm('other', batch[1].id);
+    assert.equal(service.owned('other', id).coverId, batch[1].id);
+    service.cover('other', id, batch[2].id);
+    await uploads.confirm('other', batch[0].id);
+    assert.equal(service.owned('other', id).coverId, batch[2].id);
+    assert.deepEqual(
+      service.readyPhotos(id).map((p) => p.id),
+      batch.map((p) => p.id),
+    );
+  } finally {
+    stub.mock.restore();
+    if (quota === undefined) delete process.env.USER_STORAGE_QUOTA_BYTES;
+    else process.env.USER_STORAGE_QUOTA_BYTES = quota;
+  }
+});

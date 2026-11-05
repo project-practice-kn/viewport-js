@@ -4,6 +4,8 @@ import { auth, handleAuthRequest } from '#lib/server/auth/index.ts';
 export const handle: Handle = async ({ event, resolve }) => {
   event.locals.user = null;
   if (!building) {
+    if (event.url.pathname === '/api/auth/request-password-reset')
+      return securityHeaders(new Response('Восстановление выполняет организатор', { status: 503 }));
     if (event.url.pathname.startsWith('/api/auth/'))
       return securityHeaders(await handleAuthRequest(event.request, event.getClientAddress()));
     const session = await auth().api.getSession({ headers: event.request.headers });

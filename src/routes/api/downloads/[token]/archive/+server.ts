@@ -1,3 +1,3 @@
-import { archive } from '#lib/server/downloads/index.ts';
+import { archiveResponse } from '#lib/server/downloads/response.ts';
 export const GET: import('./$types').RequestHandler = ({ params, request }) =>
-  archive({ token: params.token }, request.signal);
+  archiveResponse({ token: params.token }, request);
