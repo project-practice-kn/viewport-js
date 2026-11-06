@@ -239,7 +239,20 @@ try {
     const metadata = await sharp(preview).metadata();
     assert.equal(metadata.format, 'webp');
     assert.equal(metadata.exif, undefined);
+    assert.ok(photo.thumbnailKey);
+    const thumbnailSize = (await head(photo.thumbnailKey!)).ContentLength!;
+    const thumbnail = await read(photo.thumbnailKey!, thumbnailSize);
+    const thumbnailMeta = await sharp(thumbnail).metadata();
+    assert.equal(thumbnailMeta.format, 'webp');
+    assert.ok(Math.max(thumbnailMeta.width!, thumbnailMeta.height!) <= 480);
   }
+  const dashboardCover = await req(`/dashboard/galleries/${id}/cover`, a.cookie);
+  assert.equal(dashboardCover.status, 302);
+  assert.match(dashboardCover.headers.get('location')!, /thumbnails/);
+  assert.equal((await req(`/dashboard/galleries/${id}/cover`, b.cookie)).status, 404);
+  const sortedDashboard = await req('/dashboard?sort=size', a.cookie);
+  assert.equal(sortedDashboard.status, 200);
+  assert.match(await sortedDashboard.text(), new RegExp(`/dashboard/galleries/${id}/cover`));
   const ownerDownload = (galleryId: string, photoId: string) =>
     `/api/galleries/${galleryId}/photos/${photoId}/download`;
   for (const original of originals) {
@@ -482,13 +495,18 @@ try {
   const refreshed = await req(`/g/${token}/previews`);
   assert.equal(refreshed.status, 200);
   assert.match(refreshed.headers.get('cache-control')!, /no-store/);
-  const refreshedPhotos = (await refreshed.json()).photos as { id: string; url: string }[];
+  const refreshedPhotos = (await refreshed.json()).photos as {
+    id: string;
+    url: string;
+    thumbnailUrl: string;
+  }[];
   assert.equal(refreshedPhotos.length, originals.length);
   assert.ok(
     refreshedPhotos.every(
       (photo) => new URL(photo.url).searchParams.get('X-Amz-Expires') === '120',
     ),
   );
+  assert.ok(refreshedPhotos.every((photo) => photo.thumbnailUrl !== photo.url));
   const retriedPreview = new URL(refreshedPhotos[0].url);
   retriedPreview.hash = 'viewport-retry-1';
   assert.ok((await fetch(retriedPreview)).ok, 'Повтор превью не меняет подпись S3');
@@ -535,6 +553,39 @@ try {
   assert.equal((await req(`/api/downloads/${token}/${originals[0].id}`)).status, 404);
   assert.equal((await req(ownerDownload(id, originals[0].id), a.cookie)).status, 302);
   assert.equal((await req('/g/unknown')).status, 404);
+
+  const pagedId = await create(a.cookie, 'Порционная галерея');
+  const pageImage = await input.clone().png().toBuffer();
+  for (let index = 0; index < 25; index++)
+    await upload(pagedId, a.cookie, pageImage, `page-${index}.png`, 'image/png');
+  assert.equal((await req(`/dashboard/galleries/${pagedId}/preview`, b.cookie)).status, 404);
+  assert.equal(
+    (await req(`/dashboard/galleries/${pagedId}/previews?offset=24`, b.cookie)).status,
+    404,
+  );
+  assert.equal((await action(pagedId, a.cookie, 'publish')).status, 200);
+  const pagedToken = db().select().from(galleries).where(eq(galleries.id, pagedId)).get()!.token!;
+  const firstPage = await req(`/g/${pagedToken}`);
+  assert.equal(firstPage.status, 200);
+  const firstHtml = await firstPage.text();
+  assert.equal((firstHtml.match(/class="photo-preview"/g) ?? []).length, 24);
+  assert.match(firstHtml, /page=2/);
+  const secondPage = await req(`/g/${pagedToken}?page=2`);
+  assert.equal(secondPage.status, 200);
+  assert.equal(((await secondPage.text()).match(/class="photo-preview"/g) ?? []).length, 1);
+  const firstBatch = (await (await req(`/g/${pagedToken}/previews?limit=24`)).json()).photos as {
+    id: string;
+  }[];
+  const nextBatchResponse = await req(
+    `/g/${pagedToken}/previews?offset=24&limit=24&after=${firstBatch.at(-1)!.id}`,
+  );
+  assert.equal(nextBatchResponse.status, 200);
+  assert.equal(((await nextBatchResponse.json()).photos as unknown[]).length, 1);
+  assert.equal((await req(`/g/${pagedToken}/previews?offset=24&after=wrong`)).status, 409);
+  assert.equal((await req(`/g/${pagedToken}/previews?limit=97`)).status, 400);
+  assert.equal((await action(pagedId, a.cookie, 'unpublish')).status, 200);
+  assert.equal((await req(`/g/${pagedToken}/previews?offset=24`)).status, 404);
+
   assert.equal((await req('/logout', a.cookie, new URLSearchParams())).status, 303);
   assert.equal(
     (await req('/dashboard', a.cookie)).status,
@@ -609,6 +660,7 @@ try {
           p.uploadKey,
           p.originalKey,
           p.originalKey.replace('/originals/', '/previews/') + '.webp',
+          p.originalKey.replace('/originals/', '/thumbnails/') + '.webp',
         ])
           await remove(key);
       atomic(() => {

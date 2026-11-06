@@ -30,7 +30,8 @@ export function refreshPreviews(
             ? 'Состав галереи изменился. Обновите страницу.'
             : 'Не удалось обновить превью. Проверьте соединение.',
         );
-      const { photos }: { photos: { id: string; url: string }[] } = await response.json();
+      const { photos }: { photos: { id: string; url: string; thumbnailUrl: string }[] } =
+        await response.json();
       const anchors = [...grid.querySelectorAll<HTMLAnchorElement>('a[data-photo-id]')];
       if (
         photos.length !== anchors.length ||
@@ -42,7 +43,7 @@ export function refreshPreviews(
         anchor.href = photo.url;
         const img = anchor.querySelector('img');
         if (img) {
-          img.src = photo.url + `#refresh-${Date.now()}`;
+          img.src = photo.thumbnailUrl + `#refresh-${Date.now()}`;
         }
       }
       last = Date.now();

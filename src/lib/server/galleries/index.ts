@@ -18,7 +18,9 @@ export function owned(userId: string, id: string, draft = false, allowDeleting =
   if (draft && gallery.status !== 'draft') error(409, 'Сначала снимите галерею с публикации');
   return gallery;
 }
-export const list = (userId: string, query = '', status = '') =>
+export type GallerySort = 'date' | 'name' | 'size';
+const galleryPhotoBytes = sql<number>`(select coalesce(sum(p.size), 0) from photos p where p.gallery_id = galleries.id and p.status = 'ready' and p.deleting = 0)`;
+export const list = (userId: string, query = '', status = '', sort: GallerySort = 'date') =>
   db()
     .select({
       id: galleries.id,
@@ -28,7 +30,11 @@ export const list = (userId: string, query = '', status = '') =>
       createdAt: galleries.createdAt,
       updatedAt: galleries.updatedAt,
       token: galleries.token,
+      coverKey: sql<
+        string | null
+      >`(select coalesce(p.thumbnail_key, p.preview_key) from photos p where p.id = ${galleries.coverId} and p.gallery_id = galleries.id and p.status = 'ready' and p.deleting = 0)`,
       photoCount: sql<number>`(select count(*) from photos where photos.gallery_id = galleries.id and photos.status = 'ready' and photos.deleting = 0)`,
+      photoBytes: galleryPhotoBytes,
     })
     .from(galleries)
     .where(
@@ -38,7 +44,15 @@ export const list = (userId: string, query = '', status = '') =>
         status === 'draft' || status === 'published' ? eq(galleries.status, status) : undefined,
       ),
     )
-    .orderBy(desc(galleries.updatedAt), desc(galleries.createdAt))
+    .orderBy(
+      sort === 'name'
+        ? asc(galleries.title)
+        : sort === 'size'
+          ? desc(galleryPhotoBytes)
+          : desc(galleries.updatedAt),
+      desc(galleries.createdAt),
+      asc(galleries.id),
+    )
     .all();
 function fields(data: FormData) {
   const title = String(data.get('title') ?? '').trim();
@@ -79,15 +93,76 @@ export const readyPhotos = (id: string) =>
     .where(and(eq(photos.galleryId, id), eq(photos.status, 'ready'), eq(photos.deleting, false)))
     .orderBy(asc(photos.position), asc(photos.createdAt), asc(photos.id))
     .all();
-export async function photoViews(id: string) {
+export const PHOTO_PAGE_SIZE = 24;
+export function photoSummary(id: string) {
+  return db()
+    .select({ count: sql<number>`count(*)`, bytes: sql<number>`coalesce(sum(${photos.size}), 0)` })
+    .from(photos)
+    .where(and(eq(photos.galleryId, id), eq(photos.status, 'ready'), eq(photos.deleting, false)))
+    .get()!;
+}
+export function readyPhotoPage(id: string, offset: number, limit: number) {
+  return db()
+    .select()
+    .from(photos)
+    .where(and(eq(photos.galleryId, id), eq(photos.status, 'ready'), eq(photos.deleting, false)))
+    .orderBy(asc(photos.position), asc(photos.createdAt), asc(photos.id))
+    .limit(limit)
+    .offset(offset)
+    .all();
+}
+export async function coverView(id: string, coverId: string | null) {
+  if (!coverId) return null;
+  const photo = db()
+    .select()
+    .from(photos)
+    .where(
+      and(
+        eq(photos.id, coverId),
+        eq(photos.galleryId, id),
+        eq(photos.status, 'ready'),
+        eq(photos.deleting, false),
+      ),
+    )
+    .get();
+  return photo
+    ? {
+        id: photo.id,
+        filename: photo.filename,
+        width: photo.width!,
+        height: photo.height!,
+        url: await presignGet(photo.previewKey!),
+      }
+    : null;
+}
+export async function coverThumbnail(userId: string, id: string) {
+  const gallery = owned(userId, id);
+  if (!gallery.coverId) error(404, 'Обложка не найдена');
+  const photo = db()
+    .select()
+    .from(photos)
+    .where(
+      and(
+        eq(photos.id, gallery.coverId),
+        eq(photos.galleryId, id),
+        eq(photos.status, 'ready'),
+        eq(photos.deleting, false),
+      ),
+    )
+    .get();
+  if (!photo) error(404, 'Обложка не найдена');
+  return presignGet(photo.thumbnailKey ?? photo.previewKey!);
+}
+export async function photoViews(id: string, offset?: number, limit = PHOTO_PAGE_SIZE) {
   return Promise.all(
-    readyPhotos(id).map(async (p) => ({
+    (offset === undefined ? readyPhotos(id) : readyPhotoPage(id, offset, limit)).map(async (p) => ({
       id: p.id,
       filename: p.filename,
       width: p.width!,
       height: p.height!,
       size: p.size,
       url: await presignGet(p.previewKey!),
+      thumbnailUrl: await presignGet(p.thumbnailKey ?? p.previewKey!),
     })),
   );
 }
@@ -246,7 +321,11 @@ export async function removePhotos(userId: string, id: string, ids: string[]) {
   });
   try {
     for (const photo of items)
-      for (const key of new Set([photo.uploadKey, photo.originalKey, photo.previewKey!]))
+      for (const key of new Set(
+        [photo.uploadKey, photo.originalKey, photo.previewKey!, photo.thumbnailKey].filter(
+          (key): key is string => !!key,
+        ),
+      ))
         await removeObject(key);
   } catch {
     error(503, 'Не удалось удалить файлы. Повторите удаление фотографий');
@@ -339,6 +418,7 @@ export async function remove(userId: string, id: string) {
         photo.uploadKey,
         photo.originalKey,
         photo.previewKey ?? photo.originalKey.replace('/originals/', '/previews/') + '.webp',
+        photo.thumbnailKey ?? photo.originalKey.replace('/originals/', '/thumbnails/') + '.webp',
       ]))
         await removeObject(key);
     }

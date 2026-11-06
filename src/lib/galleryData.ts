@@ -3,7 +3,11 @@ export type GalleryData = {
   description: string;
   theme: string;
   coverId: string | null;
+  cover: { id: string; filename: string; width: number; height: number; url: string } | null;
   token: string;
+  total: number;
+  totalBytes: number;
+  offset: number;
   photos: {
     id: string;
     filename: string;
@@ -11,6 +15,7 @@ export type GalleryData = {
     height: number;
     size: number;
     url: string;
+    thumbnailUrl: string;
   }[];
   previewsHref: string;
   pageHref: string;

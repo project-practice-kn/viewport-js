@@ -314,7 +314,7 @@
         data-refreshable="true"
         use:photoViewer
         use:refreshPreviews={{
-          href: `/dashboard/galleries/${data.gallery.id}/previews`,
+          href: `/dashboard/galleries/${data.gallery.id}/previews?limit=10000`,
           onStatus: (message) => (previewProblem = message),
         }}
       >
@@ -342,7 +342,7 @@
               data-pswp-height={photo.height}
               aria-label={`Посмотреть ${photo.filename}`}
               ><img
-                src={photo.url}
+                src={photo.thumbnailUrl}
                 alt={photo.filename}
                 width={photo.width}
                 height={photo.height}

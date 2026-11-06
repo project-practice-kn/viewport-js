@@ -183,6 +183,71 @@ test('Sharp: все форматы, EXIF rotation, прозрачность, п�
   }
 });
 
+test('Миниатюра ограничена 480 px, а порции и сортировка учитывают только готовые снимки', async () => {
+  const original = await sharp({
+    create: { width: 2000, height: 1000, channels: 3, background: '#448866' },
+  })
+    .png()
+    .toBuffer();
+  const preview = await uploads.createPreview(original, 'image/png');
+  const thumbnail = await uploads.createThumbnail(preview.data);
+  const meta = await sharp(thumbnail).metadata();
+  assert.equal(meta.width, 480);
+  assert.equal(meta.height, 240);
+  assert.equal(meta.exif, undefined);
+
+  database
+    .insert(user)
+    .values({
+      id: 'thumb-page',
+      email: 'thumb-page' + '@test.invalid',
+      name: 'Проверка',
+      createdAt: now,
+      updatedAt: now,
+    })
+    .run();
+  const first = service.create('thumb-page', form('sizecase Б'));
+  const second = service.create('thumb-page', form('sizecase А'));
+  const batch = uploads.reserve('thumb-page', first, [
+    { name: 'one.png', size: 3, type: 'image/png' },
+    { name: 'two.png', size: 5, type: 'image/png' },
+    { name: 'pending.png', size: 2, type: 'image/png' },
+  ]);
+  for (const photo of batch.slice(0, 2)) {
+    database.$client
+      .prepare(
+        "update photos set status='ready',preview_key=?,width=10,height=10,preview_size=10 where id=?",
+      )
+      .run(photo.id + '.webp', photo.id);
+    database.$client
+      .prepare("update upload_reservations set status='completed' where photo_id=?")
+      .run(photo.id);
+  }
+  assert.deepEqual(
+    service.readyPhotoPage(first, 0, 1).map((p) => p.id),
+    [batch[0].id],
+  );
+  assert.deepEqual(
+    service.readyPhotoPage(first, 1, 1).map((p) => p.id),
+    [batch[1].id],
+  );
+  assert.equal(service.photoSummary(first).count, 2);
+  assert.equal(service.photoSummary(first).bytes, 8);
+  const byName = service.list('thumb-page', 'sizecase', '', 'name');
+  const bySize = service.list('thumb-page', 'sizecase', '', 'size');
+  assert.deepEqual(
+    byName.map((g) => g.id),
+    [second, first],
+  );
+  assert.deepEqual(
+    bySize.map((g) => g.id),
+    [first, second],
+  );
+  assert.equal(bySize[0].photoBytes, 8);
+  assert.equal(bySize[0].photoCount, 2);
+  assert.equal(bySize[0].coverKey, null);
+});
+
 test('S3: подпись использует публичный endpoint независимо от внутреннего адреса', async () => {
   process.env.S3_ENDPOINT = 'http://s3:8333';
   process.env.S3_PUBLIC_ENDPOINT = 'http://localhost:8333';
@@ -397,7 +462,7 @@ test('Удаление draft: владелец, обработка, срок PUT
       1,
     );
     await service.remove('other', id);
-    assert.equal(calls, 5);
+    assert.equal(calls, 6);
     assert.equal(
       (sql.prepare('select count(*) as n from photos where gallery_id=?').get(id) as { n: number })
         .n,

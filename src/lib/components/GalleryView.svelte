@@ -6,29 +6,71 @@
   import { onMount, tick, untrack } from 'svelte';
   let { data }: { data: GalleryData } = $props();
   let urls = $state<Record<string, string>>({});
+  let thumbnails = $state<Record<string, string>>({});
+  let photos = $state<GalleryData['photos']>(untrack(() => [...data.photos]));
+  let coverUrl = $state(untrack(() => data.cover?.url ?? ''));
+  let loadingMore = $state(false);
+  let moreError = $state('');
   let problem = $state<'network' | 'image' | 'unavailable' | 'changed' | null>(null);
   let refreshing = $state(false);
   let grid = $state<HTMLDivElement>();
-  let cover = $derived(data.photos.find((p) => p.id === data.coverId));
+  let cover = $derived(data.cover);
   let lastRefresh = Date.now();
   const retriedImages = new Set<string>();
   const failedImages = new Map<string, HTMLImageElement>();
   let retryVersion = 0;
   let disposed = false;
   let controller: AbortController;
-  let currentToken = untrack(() => data.token);
+  let currentToken = untrack(() => `${data.token}:${data.offset}`);
 
   $effect(() => {
-    if (currentToken !== data.token) {
-      currentToken = data.token;
+    if (currentToken !== `${data.token}:${data.offset}`) {
+      currentToken = `${data.token}:${data.offset}`;
       controller?.abort();
       urls = {};
+      thumbnails = {};
+      photos = [...data.photos];
+      coverUrl = data.cover?.url ?? '';
       problem = null;
       retriedImages.clear();
       failedImages.clear();
       lastRefresh = Date.now();
     }
   });
+
+  async function loadMore(event: MouseEvent) {
+    event.preventDefault();
+    if (loadingMore || data.offset + photos.length >= data.total) return;
+    loadingMore = true;
+    moreError = '';
+    try {
+      const offset = data.offset + photos.length;
+      const href = new URL(data.previewsHref, window.location.href);
+      href.searchParams.set('offset', String(offset));
+      href.searchParams.set('limit', '24');
+      href.searchParams.set('after', photos.at(-1)?.id ?? '');
+      const response = await fetch(href, { cache: 'no-store' });
+      if (response.status === 404) {
+        problem = 'unavailable';
+        return;
+      }
+      if (response.status === 409) {
+        problem = 'changed';
+        return;
+      }
+      if (!response.ok) throw new Error('Не удалось загрузить следующую порцию');
+      const result: { photos: GalleryData['photos'] } = await response.json();
+      if (!result.photos.length) {
+        problem = 'changed';
+        return;
+      }
+      photos = [...photos, ...result.photos];
+    } catch {
+      moreError = 'Не удалось загрузить следующую порцию. Попробуйте снова.';
+    } finally {
+      loadingMore = false;
+    }
+  }
 
   async function refreshPreviews(failedImage?: string) {
     if (disposed || problem === 'unavailable' || problem === 'changed') return;
@@ -45,30 +87,42 @@
     controller = new AbortController();
     const token = data.token;
     try {
-      const response = await fetch(data.previewsHref, {
-        cache: 'no-store',
-        signal: controller.signal,
-      });
-      if (disposed || token !== data.token) return;
-      if (response.status === 404) {
-        problem = 'unavailable';
-        return;
+      const refreshed: GalleryData['photos'] = [];
+      let refreshedCover: GalleryData['cover'] = null;
+      const count = Math.max(photos.length, 1);
+      for (let start = 0; start < count; start += 96) {
+        const href = new URL(data.previewsHref, window.location.href);
+        href.searchParams.set('offset', String(data.offset + start));
+        href.searchParams.set('limit', String(Math.min(96, count - start)));
+        if (start > 0) href.searchParams.set('after', photos[start - 1].id);
+        const response = await fetch(href, { cache: 'no-store', signal: controller.signal });
+        if (disposed || token !== data.token) return;
+        if (response.status === 404) {
+          problem = 'unavailable';
+          return;
+        }
+        if (response.status === 409) {
+          problem = 'changed';
+          return;
+        }
+        if (!response.ok) throw new Error('Не удалось обновить фотографии');
+        const result: { photos: GalleryData['photos']; cover: GalleryData['cover'] } =
+          await response.json();
+        refreshed.push(...result.photos);
+        refreshedCover = result.cover;
       }
-      if (response.status === 409) {
-        problem = 'changed';
-        return;
-      }
-      if (!response.ok) throw new Error('Не удалось обновить фотографии');
-      const result: { photos: { id: string; url: string }[] } = await response.json();
       if (disposed || token !== data.token) return;
       if (
-        result.photos.length !== data.photos.length ||
-        result.photos.some((photo, i) => photo.id !== data.photos[i].id)
+        refreshed.length !== photos.length ||
+        refreshed.some((photo, i) => photo.id !== photos[i].id) ||
+        refreshedCover?.id !== cover?.id
       ) {
         problem = 'changed';
         return;
       }
-      urls = Object.fromEntries(result.photos.map((photo) => [photo.id, photo.url]));
+      urls = Object.fromEntries(refreshed.map((photo) => [photo.id, photo.url]));
+      thumbnails = Object.fromEntries(refreshed.map((photo) => [photo.id, photo.thumbnailUrl]));
+      coverUrl = refreshedCover?.url ?? '';
       lastRefresh = Date.now();
       problem = null;
       await tick();
@@ -165,12 +219,8 @@
     <p class="eyebrow">ВАША ФОТОИСТОРИЯ</p>
     <h1>{data.title}</h1>
     {#if data.description}<p class="lede">{data.description}</p>{/if}
-    <p class="muted">{formatPhotos(data.photos.length)} · оригиналы в полном качестве</p>
-    <DownloadArchive
-      href={data.archiveHref}
-      count={data.photos.length}
-      bytes={data.photos.reduce((n, p) => n + p.size, 0)}
-    />
+    <p class="muted">{formatPhotos(data.total)} · оригиналы в полном качестве</p>
+    <DownloadArchive href={data.archiveHref} count={data.total} bytes={data.totalBytes} />
     {#if data.preview}<a class="back-link" href={data.editorHref}>← Вернуться в редактор</a>
       <p role="status">Предпросмотр доступен только владельцу.</p>{/if}
     <form method="POST" action="?/theme">
@@ -199,7 +249,7 @@
     {/if}
     {#if cover}<img
         class="story-cover"
-        src={urls[cover.id] ?? cover.url}
+        src={coverUrl}
         alt={`Обложка: ${cover.filename}`}
         width={cover.width}
         height={cover.height}
@@ -216,7 +266,7 @@
       bind:this={grid}
       use:photoViewer
     >
-      {#each data.photos as photo, i (photo.id)}<figure>
+      {#each photos as photo, i (photo.id)}<figure>
           <a
             class="photo-preview"
             href={urls[photo.id] ?? photo.url}
@@ -229,7 +279,7 @@
             data-pswp-height={photo.height}
             aria-label={`Посмотреть ${photo.filename}`}
             ><img
-              src={urls[photo.id] ?? photo.url}
+              src={thumbnails[photo.id] ?? photo.thumbnailUrl}
               alt={photo.filename}
               width={photo.width}
               height={photo.height}
@@ -241,7 +291,7 @@
             /></a
           >
           <figcaption>
-            <span>{String(i + 1).padStart(2, '0')} / {photo.filename}</span><a
+            <span>{String(data.offset + i + 1).padStart(2, '0')} / {photo.filename}</span><a
               class="download-link"
               aria-label={`Скачать оригинал ${photo.filename}`}
               href={`${data.downloadBase}/${photo.id}${data.preview ? '/download' : ''}`}
@@ -250,6 +300,16 @@
           </figcaption>
         </figure>{/each}
     </div>
+    {#if data.offset + photos.length < data.total}
+      <p class="gallery-more">
+        <a
+          href={`${data.pageHref}?page=${Math.floor((data.offset + photos.length) / 24) + 1}`}
+          onclick={loadMore}
+          aria-disabled={loadingMore}>{loadingMore ? 'Загружаем…' : 'Показать ещё фотографии'}</a
+        >
+      </p>
+    {/if}
+    {#if moreError}<p class="feedback" role="alert">{moreError}</p>{/if}
   {/if}
   <footer class="story-footer">Передано с заботой о деталях <span>VIEWPORT</span></footer>
 </div>

@@ -9,7 +9,7 @@ RUN --mount=type=cache,target=/root/.npm --mount=type=secret,id=npm_ca \
 COPY . .
 RUN --mount=type=secret,id=npm_ca \
     if [ -f /run/secrets/npm_ca ]; then export NODE_EXTRA_CA_CERTS=/run/secrets/npm_ca; fi; \
-    npm rebuild better-sqlite3 esbuild
+    npm_config_nodedir=/usr/local npm rebuild better-sqlite3 esbuild
 ARG ORIGIN=http://localhost:5173
 ENV ORIGIN=${ORIGIN}
 RUN npm run build && npm prune --omit=dev --ignore-scripts

@@ -3,9 +3,14 @@
   import { enhance } from '$app/forms';
   import { formatBytes } from '#lib/format.ts';
   import ShareLink from '#lib/components/ShareLink.svelte';
+  import { onMount } from 'svelte';
   let { data, form }: PageProps = $props();
   let creating = $state(false);
   let occupied = $derived(data.usage.used + data.usage.reserved);
+  let localDates = $state(false);
+  onMount(() => {
+    localDates = true;
+  });
 </script>
 
 <svelte:head><title>Галереи · Viewport</title></svelte:head>
@@ -87,11 +92,28 @@
         value="published">Опубликованные</option
       ></select
     >
+    <label for="gallery-sort">Сортировать</label><select
+      id="gallery-sort"
+      name="sort"
+      value={data.sort}
+    >
+      <option value="date">По дате изменения</option><option value="name">По названию</option
+      ><option value="size">По размеру</option>
+    </select>
     <button>Найти</button><a href="/dashboard">Сбросить</a>
   </form>
   {#each data.galleries as gallery, i}<article class="gallery-card">
       <a class="gallery-row" href={`/dashboard/galleries/${gallery.id}`}
-        ><span class="muted">{String(i + 1).padStart(2, '0')}</span>
+        >{#if gallery.coverUrl}<img
+            class="dashboard-cover"
+            src={gallery.coverUrl}
+            alt=""
+            width="96"
+            height="72"
+            loading="lazy"
+          />{:else}<span class="dashboard-cover dashboard-cover-empty" aria-hidden="true"
+            >{String(i + 1).padStart(2, '0')}</span
+          >{/if}
         <h2>{gallery.title}</h2>
         <span class="badge" class:published={gallery.status === 'published'}
           >{gallery.deleting
@@ -102,10 +124,12 @@
         ><span aria-hidden="true">↗</span></a
       >
       <p class="muted">
-        Фотографий: {gallery.photoCount} · Изменена: {new Date(gallery.updatedAt).toLocaleString(
-          'ru-RU',
-          { timeZone: 'UTC' },
-        )} UTC
+        Фотографий: {gallery.photoCount} · Размер: {formatBytes(gallery.photoBytes)} · Изменена:
+        <time datetime={new Date(gallery.updatedAt).toISOString()}
+          >{localDates
+            ? new Date(gallery.updatedAt).toLocaleString('ru-RU')
+            : `${new Date(gallery.updatedAt).toLocaleString('ru-RU', { timeZone: 'UTC' })} UTC`}</time
+        >
       </p>
       {#if gallery.link}<a href={gallery.link} target="_blank" rel="noreferrer"
           >Открыть для клиента ↗</a

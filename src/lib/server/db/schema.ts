@@ -102,6 +102,7 @@ export const photos = sqliteTable(
     originalKey: text('original_key').notNull().unique(),
     previewKey: text('preview_key'),
     previewSize: integer('preview_size'),
+    thumbnailKey: text('thumbnail_key'),
     width: integer('width'),
     height: integer('height'),
     position: integer('position').notNull().default(0),

@@ -160,6 +160,11 @@ export async function createPreview(original: Buffer, expectedMime: string) {
     .webp({ quality: 82 })
     .toBuffer({ resolveWithObject: true });
 }
+export const createThumbnail = (preview: Buffer) =>
+  sharp(preview)
+    .resize({ width: 480, height: 480, fit: 'inside', withoutEnlargement: true })
+    .webp({ quality: 72 })
+    .toBuffer();
 
 let processing = 0;
 const active = new Set<string>();
@@ -252,15 +257,18 @@ export async function confirm(userId: string, photoId: string) {
   processing++;
   active.add(photoId);
   const previewKey = photo.originalKey.replace('/originals/', '/previews/') + '.webp';
+  const thumbnailKey = photo.originalKey.replace('/originals/', '/thumbnails/') + '.webp';
   try {
     const info = await storage.head(photo.uploadKey);
     if (info.ContentLength !== photo.size) throw new Error('Размер оригинала не совпадает');
     const original = await storage.read(photo.uploadKey, photo.size);
     const { data, info: preview } = await createPreview(original, photo.mime);
+    const thumbnail = await createThumbnail(data);
     const mime = photo.mime;
     // Only the server can write accepted originals; a repeated temporary PUT cannot overwrite them.
     await storage.put(photo.originalKey, original, mime);
     await storage.put(previewKey, data, 'image/webp');
+    await storage.put(thumbnailKey, thumbnail, 'image/webp');
     atomic(() => {
       owned(userId, photo.galleryId, true);
       const current = getPhoto(userId, photoId);
@@ -275,6 +283,7 @@ export async function confirm(userId: string, photoId: string) {
         .set({
           status: 'ready',
           previewKey,
+          thumbnailKey,
           previewSize: data.length,
           width: preview.width,
           height: preview.height,
@@ -362,6 +371,7 @@ export async function cleanup(
       if (discard) {
         await storage.remove(photo.originalKey);
         await storage.remove(photo.originalKey.replace('/originals/', '/previews/') + '.webp');
+        await storage.remove(photo.originalKey.replace('/originals/', '/thumbnails/') + '.webp');
       }
       atomic(() => {
         if (reservation.status === 'reserved')
