@@ -166,6 +166,52 @@ export async function photoViews(id: string, offset?: number, limit = PHOTO_PAGE
     })),
   );
 }
+type PhotoPageOptions = { offset: number; limit: number; after: string | null };
+function photoPageOptions(search: URLSearchParams, maxLimit: number): PhotoPageOptions {
+  const offset = Number(search.get('offset') ?? '0');
+  const limit = Number(search.get('limit') ?? String(PHOTO_PAGE_SIZE));
+  if (
+    !Number.isSafeInteger(offset) ||
+    offset < 0 ||
+    !Number.isSafeInteger(limit) ||
+    limit < 1 ||
+    limit > maxLimit
+  )
+    error(400, 'Неверная страница');
+  return { offset, limit, after: search.get('after') };
+}
+async function signedPhotoPage(
+  id: string,
+  coverId: string | null,
+  options: PhotoPageOptions,
+  checkAccess: () => void,
+) {
+  const { offset, limit, after } = options;
+  if (offset > 0 && after && readyPhotoPage(id, offset - 1, 1)[0]?.id !== after)
+    error(409, 'Состав галереи изменился');
+  const photos = await photoViews(id, offset, limit);
+  const cover = await coverView(id, coverId);
+  // Access and composition can change while S3 URLs are being signed.
+  checkAccess();
+  const current = readyPhotoPage(id, offset, limit);
+  if (current.length !== photos.length || current.some((photo, i) => photo.id !== photos[i].id))
+    error(409, 'Состав галереи изменился. Обновите страницу.');
+  return { photos, cover };
+}
+export function publicPhotoPage(token: string, search: URLSearchParams) {
+  const gallery = publicGallery(token);
+  return signedPhotoPage(gallery.id, gallery.coverId, photoPageOptions(search, 96), () => {
+    const current = publicGallery(token);
+    if (current.coverId !== gallery.coverId) error(409, 'Состав галереи изменился');
+  });
+}
+export function ownedPhotoPage(userId: string, id: string, search: URLSearchParams) {
+  const gallery = owned(userId, id);
+  return signedPhotoPage(id, gallery.coverId, photoPageOptions(search, 10000), () => {
+    const current = owned(userId, id);
+    if (current.coverId !== gallery.coverId) error(409, 'Состав галереи изменился');
+  });
+}
 export function cover(userId: string, id: string, photoId: string) {
   atomic(() => {
     owned(userId, id, true);

@@ -563,6 +563,9 @@ try {
     (await req(`/dashboard/galleries/${pagedId}/previews?offset=24`, b.cookie)).status,
     404,
   );
+  const ownedBatch = await req(`/dashboard/galleries/${pagedId}/previews?offset=24`, a.cookie);
+  assert.equal(ownedBatch.status, 200);
+  assert.equal(((await ownedBatch.json()).photos as unknown[]).length, 1);
   assert.equal((await action(pagedId, a.cookie, 'publish')).status, 200);
   const pagedToken = db().select().from(galleries).where(eq(galleries.id, pagedId)).get()!.token!;
   const firstPage = await req(`/g/${pagedToken}`);
