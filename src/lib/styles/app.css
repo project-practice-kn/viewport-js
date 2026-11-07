@@ -363,11 +363,23 @@ fieldset {
 }
 .gallery-row {
   display: grid;
-  grid-template-columns: 40px minmax(0, 1fr) auto 24px;
+  grid-template-columns: 96px minmax(0, 1fr) auto 24px;
   gap: 24px;
   padding: 28px 0;
   border-bottom: 1px solid var(--line);
   align-items: center;
+}
+.dashboard-cover {
+  width: 96px;
+  height: 72px;
+  object-fit: cover;
+  border-radius: 3px;
+  background: var(--line);
+}
+.dashboard-cover-empty {
+  display: grid;
+  place-items: center;
+  color: var(--muted);
 }
 .gallery-row:hover {
   background: #eeefe6;
@@ -524,6 +536,34 @@ fieldset {
   display: grid;
   gap: 30px 20px;
   grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.gallery-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 16px;
+  margin-bottom: 24px;
+}
+.gallery-filters label {
+  flex: 1 1 180px;
+  margin: 0;
+}
+.gallery-filters select {
+  flex: 1 1 180px;
+  width: auto;
+}
+.gallery-card {
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 20px;
+}
+.gallery-card .gallery-row {
+  border-bottom: 0;
+}
+.archive-panel {
+  margin: 16px 0 24px;
+}
+.archive-panel p {
+  margin: 8px 0;
 }
 .photo-item img {
   display: block;
@@ -721,8 +761,12 @@ fieldset {
     max-width: none;
   }
   .gallery-row {
-    grid-template-columns: 24px minmax(0, 1fr) 24px;
+    grid-template-columns: 72px minmax(0, 1fr) 24px;
     gap: 12px;
+  }
+  .dashboard-cover {
+    width: 72px;
+    height: 56px;
   }
   .gallery-row > :last-child {
     grid-column: 3;

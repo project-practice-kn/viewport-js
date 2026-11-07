@@ -62,7 +62,12 @@ export function reserve(userId: string, galleryId: string, files: FileMetadata[]
       expiresAt = new Date(
         now.getTime() + Math.min(limit('UPLOAD_RESERVATION_TTL_SECONDS', 1800), 3600) * 1000,
       );
-    return files.map((f) => {
+    const firstPosition = db()
+      .select({ value: sql<number>`coalesce(max(${photos.position}),-1)+1` })
+      .from(photos)
+      .where(eq(photos.galleryId, galleryId))
+      .get()!.value;
+    return files.map((f, index) => {
       const id = randomUUID(),
         prefix = `users/${userId}/galleries/${galleryId}`;
       const photo = {
@@ -71,6 +76,7 @@ export function reserve(userId: string, galleryId: string, files: FileMetadata[]
         filename: storage.safeFilename(f.name),
         mime: f.type,
         size: f.size,
+        position: firstPosition + index,
         uploadKey: `${prefix}/uploads/${id}`,
         originalKey: `${prefix}/originals/${id}`,
         createdAt: now,
@@ -154,6 +160,11 @@ export async function createPreview(original: Buffer, expectedMime: string) {
     .webp({ quality: 82 })
     .toBuffer({ resolveWithObject: true });
 }
+export const createThumbnail = (preview: Buffer) =>
+  sharp(preview)
+    .resize({ width: 480, height: 480, fit: 'inside', withoutEnlargement: true })
+    .webp({ quality: 72 })
+    .toBuffer();
 
 let processing = 0;
 const active = new Set<string>();
@@ -246,15 +257,18 @@ export async function confirm(userId: string, photoId: string) {
   processing++;
   active.add(photoId);
   const previewKey = photo.originalKey.replace('/originals/', '/previews/') + '.webp';
+  const thumbnailKey = photo.originalKey.replace('/originals/', '/thumbnails/') + '.webp';
   try {
     const info = await storage.head(photo.uploadKey);
     if (info.ContentLength !== photo.size) throw new Error('Размер оригинала не совпадает');
     const original = await storage.read(photo.uploadKey, photo.size);
     const { data, info: preview } = await createPreview(original, photo.mime);
+    const thumbnail = await createThumbnail(data);
     const mime = photo.mime;
     // Only the server can write accepted originals; a repeated temporary PUT cannot overwrite them.
     await storage.put(photo.originalKey, original, mime);
     await storage.put(previewKey, data, 'image/webp');
+    await storage.put(thumbnailKey, thumbnail, 'image/webp');
     atomic(() => {
       owned(userId, photo.galleryId, true);
       const current = getPhoto(userId, photoId);
@@ -264,20 +278,15 @@ export async function confirm(userId: string, photoId: string) {
         reservation.expiresAt.getTime() <= Date.now()
       )
         error(410, 'Срок загрузки истёк');
-      const position = db()
-        .select({ value: sql<number>`coalesce(max(${photos.position}),-1)+1` })
-        .from(photos)
-        .where(eq(photos.galleryId, photo.galleryId))
-        .get()!.value;
       db()
         .update(photos)
         .set({
           status: 'ready',
           previewKey,
+          thumbnailKey,
           previewSize: data.length,
           width: preview.width,
           height: preview.height,
-          position,
           updatedAt: new Date(),
         })
         .where(eq(photos.id, photoId))
@@ -291,6 +300,18 @@ export async function confirm(userId: string, photoId: string) {
         .update(galleries)
         .set({ coverId: photoId })
         .where(and(eq(galleries.id, photo.galleryId), sql`${galleries.coverId} is null`))
+        .run();
+      // The automatic cover follows selection order until the owner explicitly chooses one.
+      const gallery = db().select().from(galleries).where(eq(galleries.id, photo.galleryId)).get()!;
+      const currentCover = gallery.coverId
+        ? db().select().from(photos).where(eq(photos.id, gallery.coverId)).get()
+        : undefined;
+      if (!gallery.coverSelected && currentCover && photo.position < currentCover.position)
+        db().update(galleries).set({ coverId: photoId }).where(eq(galleries.id, gallery.id)).run();
+      db()
+        .update(galleries)
+        .set({ updatedAt: new Date() })
+        .where(eq(galleries.id, photo.galleryId))
         .run();
     });
     // Temporary object remains tracked for deletion after the PUT URL expires.
@@ -312,13 +333,21 @@ export function cancel(userId: string, photoId: string) {
     failPhoto(photoId);
   });
 }
-export async function cleanup(batchSize = 25, options: { deletedUploads?: boolean } = {}) {
+export async function cleanup(
+  batchSize = 25,
+  options: { deletedUploads?: boolean; galleryId?: string } = {},
+) {
   if (options.deletedUploads !== false) await cleanupDeletedUploads(batchSize);
   const candidates = db()
     .select({ photo: photos, reservation: reservations })
     .from(photos)
     .innerJoin(reservations, eq(photos.id, reservations.photoId))
-    .where(sql`${reservations.expiresAt} <= ${Date.now()} and ${reservations.cleanedAt} is null`)
+    .where(
+      and(
+        sql`${reservations.expiresAt} <= ${Date.now()} and ${reservations.cleanedAt} is null`,
+        options.galleryId ? eq(photos.galleryId, options.galleryId) : undefined,
+      ),
+    )
     .limit(batchSize)
     .all();
   let cleaned = 0;
@@ -342,6 +371,7 @@ export async function cleanup(batchSize = 25, options: { deletedUploads?: boolea
       if (discard) {
         await storage.remove(photo.originalKey);
         await storage.remove(photo.originalKey.replace('/originals/', '/previews/') + '.webp');
+        await storage.remove(photo.originalKey.replace('/originals/', '/thumbnails/') + '.webp');
       }
       atomic(() => {
         if (reservation.status === 'reserved')
@@ -363,4 +393,48 @@ export async function cleanup(batchSize = 25, options: { deletedUploads?: boolea
     }
   }
   return cleaned;
+}
+
+export function unfinished(userId: string, galleryId: string) {
+  owned(userId, galleryId, false, true);
+  return db()
+    .select({
+      id: photos.id,
+      filename: photos.filename,
+      size: photos.size,
+      status: photos.status,
+      reservationStatus: reservations.status,
+      expiresAt: reservations.expiresAt,
+    })
+    .from(photos)
+    .innerJoin(reservations, eq(photos.id, reservations.photoId))
+    .where(
+      and(
+        eq(photos.galleryId, galleryId),
+        sql`${photos.status} != 'ready'`,
+        eq(photos.deleting, false),
+      ),
+    )
+    .orderBy(asc(photos.position), asc(photos.createdAt))
+    .all()
+    .map((p) => ({
+      ...p,
+      canConfirm:
+        p.status === 'pending' &&
+        p.reservationStatus === 'reserved' &&
+        p.expiresAt.getTime() > Date.now(),
+      canCancel: p.status !== 'processing',
+    }));
+}
+
+export async function refreshGalleryUploads(userId: string, galleryId: string) {
+  owned(userId, galleryId, false, true);
+  await cleanup(100, { deletedUploads: false, galleryId });
+  return unfinished(userId, galleryId);
+}
+
+export function assertUploadGallery(userId: string, galleryId: string, photoId: string) {
+  const { photo } = getPhoto(userId, photoId);
+  owned(userId, galleryId, true);
+  if (photo.galleryId !== galleryId) error(404, 'Фотография не найдена');
 }

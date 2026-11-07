@@ -1,9 +1,15 @@
 import { fail, redirect } from '@sveltejs/kit';
 import { handleAuthRequest } from '#lib/server/auth/index.ts';
 import { origin } from '#lib/server/config.ts';
+import { safeReturnTo } from '#lib/authReturn.ts';
 export const load = ({ locals, url }: import('./$types').PageServerLoadEvent) => {
-  if (locals.user) redirect(303, '/dashboard');
-  return { register: url.searchParams.get('mode') === 'register' };
+  const returnTo = safeReturnTo(url.searchParams.get('returnTo'));
+  if (locals.user) redirect(303, returnTo);
+  return {
+    register: url.searchParams.get('mode') === 'register',
+    returnTo,
+    reset: url.searchParams.get('reset') === 'success',
+  };
 };
 export const actions = {
   default: async ({
@@ -84,6 +90,6 @@ export const actions = {
           maxAge: value['max-age'] ? Number(value['max-age']) : undefined,
         });
     }
-    redirect(303, '/dashboard');
+    redirect(303, safeReturnTo(String(data.get('returnTo') ?? '')));
   },
 };

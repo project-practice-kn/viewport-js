@@ -1,5 +1,5 @@
 import { randomUUID, randomBytes } from 'node:crypto';
-import { and, eq, asc, desc } from 'drizzle-orm';
+import { and, eq, asc, desc, sql, inArray, like } from 'drizzle-orm';
 import { error } from '@sveltejs/kit';
 import { db, atomic } from '../db/index.ts';
 import { galleries, photos, reservations, deletedUploads } from '../db/schema.ts';
@@ -18,7 +18,9 @@ export function owned(userId: string, id: string, draft = false, allowDeleting =
   if (draft && gallery.status !== 'draft') error(409, 'Сначала снимите галерею с публикации');
   return gallery;
 }
-export const list = (userId: string) =>
+export type GallerySort = 'date' | 'name' | 'size';
+const galleryPhotoBytes = sql<number>`(select coalesce(sum(p.size), 0) from photos p where p.gallery_id = galleries.id and p.status = 'ready' and p.deleting = 0)`;
+export const list = (userId: string, query = '', status = '', sort: GallerySort = 'date') =>
   db()
     .select({
       id: galleries.id,
@@ -26,10 +28,31 @@ export const list = (userId: string) =>
       status: galleries.status,
       deleting: galleries.deleting,
       createdAt: galleries.createdAt,
+      updatedAt: galleries.updatedAt,
+      token: galleries.token,
+      coverKey: sql<
+        string | null
+      >`(select coalesce(p.thumbnail_key, p.preview_key) from photos p where p.id = ${galleries.coverId} and p.gallery_id = galleries.id and p.status = 'ready' and p.deleting = 0)`,
+      photoCount: sql<number>`(select count(*) from photos where photos.gallery_id = galleries.id and photos.status = 'ready' and photos.deleting = 0)`,
+      photoBytes: galleryPhotoBytes,
     })
     .from(galleries)
-    .where(eq(galleries.userId, userId))
-    .orderBy(desc(galleries.createdAt))
+    .where(
+      and(
+        eq(galleries.userId, userId),
+        query ? like(galleries.title, `%${query}%`) : undefined,
+        status === 'draft' || status === 'published' ? eq(galleries.status, status) : undefined,
+      ),
+    )
+    .orderBy(
+      sort === 'name'
+        ? asc(galleries.title)
+        : sort === 'size'
+          ? desc(galleryPhotoBytes)
+          : desc(galleries.updatedAt),
+      desc(galleries.createdAt),
+      asc(galleries.id),
+    )
     .all();
 function fields(data: FormData) {
   const title = String(data.get('title') ?? '').trim();
@@ -67,26 +90,138 @@ export const readyPhotos = (id: string) =>
   db()
     .select()
     .from(photos)
-    .where(and(eq(photos.galleryId, id), eq(photos.status, 'ready')))
+    .where(and(eq(photos.galleryId, id), eq(photos.status, 'ready'), eq(photos.deleting, false)))
     .orderBy(asc(photos.position), asc(photos.createdAt), asc(photos.id))
     .all();
-export async function photoViews(id: string) {
+export const PHOTO_PAGE_SIZE = 24;
+export function photoSummary(id: string) {
+  return db()
+    .select({ count: sql<number>`count(*)`, bytes: sql<number>`coalesce(sum(${photos.size}), 0)` })
+    .from(photos)
+    .where(and(eq(photos.galleryId, id), eq(photos.status, 'ready'), eq(photos.deleting, false)))
+    .get()!;
+}
+export function readyPhotoPage(id: string, offset: number, limit: number) {
+  return db()
+    .select()
+    .from(photos)
+    .where(and(eq(photos.galleryId, id), eq(photos.status, 'ready'), eq(photos.deleting, false)))
+    .orderBy(asc(photos.position), asc(photos.createdAt), asc(photos.id))
+    .limit(limit)
+    .offset(offset)
+    .all();
+}
+export async function coverView(id: string, coverId: string | null) {
+  if (!coverId) return null;
+  const photo = db()
+    .select()
+    .from(photos)
+    .where(
+      and(
+        eq(photos.id, coverId),
+        eq(photos.galleryId, id),
+        eq(photos.status, 'ready'),
+        eq(photos.deleting, false),
+      ),
+    )
+    .get();
+  return photo
+    ? {
+        id: photo.id,
+        filename: photo.filename,
+        width: photo.width!,
+        height: photo.height!,
+        url: await presignGet(photo.previewKey!),
+      }
+    : null;
+}
+export async function coverThumbnail(userId: string, id: string) {
+  const gallery = owned(userId, id);
+  if (!gallery.coverId) error(404, 'Обложка не найдена');
+  const photo = db()
+    .select()
+    .from(photos)
+    .where(
+      and(
+        eq(photos.id, gallery.coverId),
+        eq(photos.galleryId, id),
+        eq(photos.status, 'ready'),
+        eq(photos.deleting, false),
+      ),
+    )
+    .get();
+  if (!photo) error(404, 'Обложка не найдена');
+  return presignGet(photo.thumbnailKey ?? photo.previewKey!);
+}
+export async function photoViews(id: string, offset?: number, limit = PHOTO_PAGE_SIZE) {
   return Promise.all(
-    readyPhotos(id).map(async (p) => ({
+    (offset === undefined ? readyPhotos(id) : readyPhotoPage(id, offset, limit)).map(async (p) => ({
       id: p.id,
       filename: p.filename,
       width: p.width!,
       height: p.height!,
+      size: p.size,
       url: await presignGet(p.previewKey!),
+      thumbnailUrl: await presignGet(p.thumbnailKey ?? p.previewKey!),
     })),
   );
+}
+type PhotoPageOptions = { offset: number; limit: number; after: string | null };
+function photoPageOptions(search: URLSearchParams, maxLimit: number): PhotoPageOptions {
+  const offset = Number(search.get('offset') ?? '0');
+  const limit = Number(search.get('limit') ?? String(PHOTO_PAGE_SIZE));
+  if (
+    !Number.isSafeInteger(offset) ||
+    offset < 0 ||
+    !Number.isSafeInteger(limit) ||
+    limit < 1 ||
+    limit > maxLimit
+  )
+    error(400, 'Неверная страница');
+  return { offset, limit, after: search.get('after') };
+}
+async function signedPhotoPage(
+  id: string,
+  coverId: string | null,
+  options: PhotoPageOptions,
+  checkAccess: () => void,
+) {
+  const { offset, limit, after } = options;
+  if (offset > 0 && after && readyPhotoPage(id, offset - 1, 1)[0]?.id !== after)
+    error(409, 'Состав галереи изменился');
+  const photos = await photoViews(id, offset, limit);
+  const cover = await coverView(id, coverId);
+  // Access and composition can change while S3 URLs are being signed.
+  checkAccess();
+  const current = readyPhotoPage(id, offset, limit);
+  if (current.length !== photos.length || current.some((photo, i) => photo.id !== photos[i].id))
+    error(409, 'Состав галереи изменился. Обновите страницу.');
+  return { photos, cover };
+}
+export function publicPhotoPage(token: string, search: URLSearchParams) {
+  const gallery = publicGallery(token);
+  return signedPhotoPage(gallery.id, gallery.coverId, photoPageOptions(search, 96), () => {
+    const current = publicGallery(token);
+    if (current.coverId !== gallery.coverId) error(409, 'Состав галереи изменился');
+  });
+}
+export function ownedPhotoPage(userId: string, id: string, search: URLSearchParams) {
+  const gallery = owned(userId, id);
+  return signedPhotoPage(id, gallery.coverId, photoPageOptions(search, 10000), () => {
+    const current = owned(userId, id);
+    if (current.coverId !== gallery.coverId) error(409, 'Состав галереи изменился');
+  });
 }
 export function cover(userId: string, id: string, photoId: string) {
   atomic(() => {
     owned(userId, id, true);
     if (!readyPhotos(id).some((p) => p.id === photoId))
       error(400, 'Выберите готовую фотографию этой галереи');
-    db().update(galleries).set({ coverId: photoId }).where(eq(galleries.id, id)).run();
+    db()
+      .update(galleries)
+      .set({ coverId: photoId, coverSelected: true, updatedAt: new Date() })
+      .where(eq(galleries.id, id))
+      .run();
   });
 }
 export function reorder(userId: string, id: string, ids: string[]) {
@@ -99,9 +234,14 @@ export function reorder(userId: string, id: string, ids: string[]) {
       current.some((p) => !ids.includes(p.id))
     )
       error(400, 'Передайте все фотографии без повторов');
-    ids.forEach((photoId, position) =>
-      db().update(photos).set({ position }).where(eq(photos.id, photoId)).run(),
+    ids.forEach((photoId, index) =>
+      db()
+        .update(photos)
+        .set({ position: current[index].position })
+        .where(eq(photos.id, photoId))
+        .run(),
     );
+    db().update(galleries).set({ updatedAt: new Date() }).where(eq(galleries.id, id)).run();
   });
 }
 export function move(userId: string, id: string, photoId: string, direction: string) {
@@ -127,6 +267,14 @@ export function publish(userId: string, id: string) {
       .innerJoin(photos, eq(photos.id, reservations.photoId))
       .where(and(eq(photos.galleryId, id), eq(reservations.status, 'reserved')))
       .get();
+    if (
+      db()
+        .select({ id: photos.id })
+        .from(photos)
+        .where(and(eq(photos.galleryId, id), eq(photos.deleting, true)))
+        .get()
+    )
+      error(409, 'Завершите удаление фотографий перед публикацией');
     if (!ready.length || !ready.some((p) => p.id === gallery.coverId) || active)
       error(409, 'Нужны готовые фотографии, обложка и завершённые загрузки');
     const token = gallery.token ?? randomBytes(32).toString('base64url');
@@ -136,6 +284,112 @@ export function publish(userId: string, id: string) {
       .where(eq(galleries.id, id))
       .run();
     return token;
+  });
+}
+
+export function rotateLink(userId: string, id: string) {
+  return atomic(() => {
+    const gallery = owned(userId, id);
+    if (gallery.status !== 'published') error(409, 'Сначала опубликуйте галерею');
+    const token = randomBytes(32).toString('base64url');
+    db().update(galleries).set({ token, updatedAt: new Date() }).where(eq(galleries.id, id)).run();
+    return token;
+  });
+}
+
+export function sortByName(userId: string, id: string) {
+  owned(userId, id, true);
+  const sorted = readyPhotos(id).sort(
+    (a, b) =>
+      a.filename.localeCompare(b.filename, 'ru', { numeric: true }) || a.position - b.position,
+  );
+  reorder(
+    userId,
+    id,
+    sorted.map((p) => p.id),
+  );
+}
+
+export function moveMany(userId: string, id: string, selected: string[], target: string) {
+  atomic(() => {
+    owned(userId, id, true);
+    const current = readyPhotos(id).map((p) => p.id);
+    if (
+      !selected.length ||
+      new Set(selected).size !== selected.length ||
+      selected.some((p) => !current.includes(p))
+    )
+      error(400, 'Выберите фотографии этой галереи');
+    if (!['start', 'end'].includes(target)) error(400, 'Выберите начало или конец галереи');
+    const chosen = current.filter((p) => selected.includes(p)),
+      rest = current.filter((p) => !selected.includes(p));
+    reorder(userId, id, target === 'start' ? [...chosen, ...rest] : [...rest, ...chosen]);
+  });
+}
+
+export function deletingPhotos(userId: string, id: string) {
+  owned(userId, id, false, true);
+  return db()
+    .select({ id: photos.id, filename: photos.filename, size: photos.size })
+    .from(photos)
+    .where(and(eq(photos.galleryId, id), eq(photos.deleting, true)))
+    .all();
+}
+
+export async function removePhotos(userId: string, id: string, ids: string[]) {
+  const items = atomic(() => {
+    const gallery = owned(userId, id, true);
+    if (hasActiveArchive(id)) error(409, 'Дождитесь завершения скачивания архива');
+    if (!ids.length || new Set(ids).size !== ids.length) error(400, 'Выберите фотографии');
+    const items = db()
+      .select()
+      .from(photos)
+      .where(and(eq(photos.galleryId, id), inArray(photos.id, ids)))
+      .all();
+    if (items.length !== ids.length || items.some((p) => p.status !== 'ready'))
+      error(404, 'Фотографии не найдены');
+    db()
+      .update(photos)
+      .set({ deleting: true, updatedAt: new Date() })
+      .where(inArray(photos.id, ids))
+      .run();
+    if (gallery.coverId && ids.includes(gallery.coverId))
+      db()
+        .update(galleries)
+        .set({
+          coverId: readyPhotos(id)[0]?.id ?? null,
+          coverSelected: false,
+          updatedAt: new Date(),
+        })
+        .where(eq(galleries.id, id))
+        .run();
+    return items;
+  });
+  try {
+    for (const photo of items)
+      for (const key of new Set(
+        [photo.uploadKey, photo.originalKey, photo.previewKey!, photo.thumbnailKey].filter(
+          (key): key is string => !!key,
+        ),
+      ))
+        await removeObject(key);
+  } catch {
+    error(503, 'Не удалось удалить файлы. Повторите удаление фотографий');
+  }
+  atomic(() => {
+    owned(userId, id, true);
+    for (const photo of items)
+      db()
+        .insert(deletedUploads)
+        .values({ uploadKey: photo.uploadKey })
+        .onConflictDoNothing()
+        .run();
+    db().delete(reservations).where(inArray(reservations.photoId, ids)).run();
+    db()
+      .delete(photos)
+      .where(and(eq(photos.galleryId, id), inArray(photos.id, ids), eq(photos.deleting, true)))
+      .run();
+    db().update(galleries).set({ updatedAt: new Date() }).where(eq(galleries.id, id)).run();
   });
 }
 export function unpublish(userId: string, id: string) {
@@ -210,6 +464,7 @@ export async function remove(userId: string, id: string) {
         photo.uploadKey,
         photo.originalKey,
         photo.previewKey ?? photo.originalKey.replace('/originals/', '/previews/') + '.webp',
+        photo.thumbnailKey ?? photo.originalKey.replace('/originals/', '/thumbnails/') + '.webp',
       ]))
         await removeObject(key);
     }

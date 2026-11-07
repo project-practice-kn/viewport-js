@@ -1,0 +1,1 @@
+ALTER TABLE `photos` ADD `deleting` integer DEFAULT false NOT NULL;

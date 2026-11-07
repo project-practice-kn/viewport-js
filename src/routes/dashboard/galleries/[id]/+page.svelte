@@ -2,17 +2,38 @@
   import type { PageProps } from './$types';
   import PhotoUploader from '#lib/components/PhotoUploader.svelte';
   import ShareLink from '#lib/components/ShareLink.svelte';
-  import { formatPhotos } from '#lib/format.ts';
+  import DownloadArchive from '#lib/components/DownloadArchive.svelte';
+  import { refreshPreviews } from '#lib/refreshPreviews.ts';
+  import { formatBytes, formatPhotos } from '#lib/format.ts';
   import { photoViewer } from '#lib/photoViewer.ts';
   import { enhance, type SubmitFunction } from '$app/forms';
-  import { invalidateAll } from '$app/navigation';
-  import { untrack } from 'svelte';
+  import { beforeNavigate, invalidateAll } from '$app/navigation';
+  import { untrack, onMount } from 'svelte';
   let { data, form }: PageProps = $props();
   let title = $state(untrack(() => String(form?.values?.title ?? data.gallery.title)));
   let description = $state(
     untrack(() => String(form?.values?.description ?? data.gallery.description)),
   );
   let theme = $state(untrack(() => String(form?.values?.theme ?? data.gallery.theme)));
+  let selected = $state<string[]>([]);
+  let mounted = $state(false);
+  onMount(() => {
+    mounted = true;
+  });
+  let grid = $state<HTMLDivElement>();
+  let previewProblem = $state('');
+  let blockedUploads = $derived(
+    data.uploads.filter((p) => p.reservationStatus === 'reserved').length,
+  );
+  beforeNavigate(({ cancel, willUnload, from, to }) => {
+    if (
+      !dirty ||
+      uploading ||
+      (to?.url.pathname === from?.url.pathname && to?.url.search === from?.url.search)
+    )
+      return;
+    if (willUnload || !window.confirm('Есть несохранённые настройки. Покинуть страницу?')) cancel();
+  });
   let editorId = untrack(() => data.gallery.id);
   $effect(() => {
     if (editorId === data.gallery.id) return;
@@ -38,7 +59,9 @@
     return async ({ update, result }) => {
       try {
         await update({ reset: false });
-        if (result.type === 'failure' && action.search === '?/delete') await invalidateAll();
+        if (result.type === 'failure' && ['?/delete', '?/removePhotos'].includes(action.search))
+          await invalidateAll();
+        if (result.type === 'success' && action.search === '?/removePhotos') selected = [];
         if (result.type === 'success' && action.search === '?/save') {
           title = data.gallery.title;
           description = data.gallery.description;
@@ -98,6 +121,15 @@
         </fieldset>
       </form>
       <div class="publish-panel">
+        <a href={`/dashboard/galleries/${data.gallery.id}/preview`} target="_blank" rel="noreferrer"
+          >Предпросмотр для клиента ↗</a
+        >
+        <p class="muted">
+          Готово: {data.photos.length} · незавершённых: {blockedUploads} · ошибок: {data.uploads.filter(
+            (p) => p.status === 'failed',
+          ).length} · обложка: {data.photos.find((p) => p.id === data.gallery.coverId)?.filename ??
+            'не выбрана'}
+        </p>
         {#if data.gallery.status === 'published'}<p>
             Галерея доступна клиенту по ссылке. Чтобы изменить её, снимите публикацию.
           </p>
@@ -105,6 +137,16 @@
             >Открыть галерею <span class="visually-hidden">в новой вкладке</span>↗</a
           >
           <ShareLink href={data.gallery.link!} />
+          <form method="POST" action="?/rotateLink" use:enhance={submit}>
+            <p class="muted">
+              Старая ссылка перестанет открывать галерею. Уже выданные ссылки на файлы действуют до
+              120 секунд; начатый архив продолжит скачивание.
+            </p>
+            <label
+              ><input type="checkbox" name="confirmLink" value="yes" required /> Подтверждаю смену ссылки</label
+            >
+            <button disabled={locked}>Сменить ссылку</button>
+          </form>
           <form
             method="POST"
             action="?/unpublish"
@@ -126,18 +168,26 @@
           >
             <button
               class="primary"
-              disabled={locked || dirty || data.photos.length === 0}
+              disabled={locked ||
+                dirty ||
+                data.photos.length === 0 ||
+                blockedUploads > 0 ||
+                data.deletingPhotos.length > 0}
               aria-describedby="publish-hint"
               >{pending === '?/publish' ? 'Публикуем…' : 'Опубликовать галерею ↗'}</button
             >
             <p id="publish-hint" class="muted form-hint">
               {uploading
                 ? 'Дождитесь завершения загрузки фотографий.'
-                : dirty
-                  ? 'Сохраните настройки перед публикацией.'
-                  : data.photos.length === 0
-                    ? 'Сначала добавьте фотографии.'
-                    : 'Откроется доступ по ссылке. Для клиента аккаунт не нужен.'}
+                : blockedUploads > 0
+                  ? `Есть незавершённые загрузки: ${blockedUploads}. Продолжите проверку или отмените их ниже.`
+                  : data.deletingPhotos.length > 0
+                    ? 'Завершите удаление фотографий.'
+                    : dirty
+                      ? 'Сохраните настройки перед публикацией.'
+                      : data.photos.length === 0
+                        ? 'Сначала добавьте фотографии.'
+                        : 'Откроется доступ по ссылке. Для клиента аккаунт не нужен.'}
             </p>
           </form>{/if}
       </div>
@@ -145,27 +195,154 @@
     <section id="gallery-photos" aria-label="Фотографии галереи">
       {#if data.gallery.status === 'draft'}<PhotoUploader
           galleryId={data.gallery.id}
+          usage={data.usage}
           bind:busy={uploading}
           disabled={pending !== null}
         />{/if}
-      {#if data.photos.length}<a
-          class="download-link"
-          href={`/api/galleries/${data.gallery.id}/archive`}>Скачать все фотографии ZIP ↓</a
-        >{/if}
-      <div class="photo-grid editor-grid" data-downloads="true" use:photoViewer>
+      {#if data.gallery.status === 'draft' && data.uploads.length}
+        <section aria-label="Незавершённые загрузки">
+          <h2>Незавершённые загрузки</h2>
+          <p class="muted">
+            Файлы, не переданные целиком, выберите повторно. Для уже переданного файла можно
+            продолжить проверку.
+          </p>
+          {#each data.uploads as upload}<article class="publish-panel">
+              <strong>{upload.filename}</strong> · {formatBytes(upload.size)}
+              <p>
+                {upload.status === 'processing'
+                  ? 'Обрабатывается'
+                  : upload.canConfirm
+                    ? 'Ожидает проверки'
+                    : upload.status === 'failed'
+                      ? 'Не загружен — выберите файл повторно'
+                      : 'Срок загрузки истёк — выберите файл повторно'}
+              </p>
+              {#if upload.canConfirm}<form
+                  method="POST"
+                  action="?/confirmUpload"
+                  use:enhance={submit}
+                >
+                  <input type="hidden" name="photoId" value={upload.id} /><button disabled={locked}
+                    >Продолжить проверку</button
+                  >
+                </form>{/if}
+              {#if upload.canCancel && upload.reservationStatus === 'reserved'}<form
+                  method="POST"
+                  action="?/cancelUpload"
+                  use:enhance={submit}
+                >
+                  <input type="hidden" name="photoId" value={upload.id} /><button disabled={locked}
+                    >Отменить загрузку</button
+                  >
+                </form>{/if}
+              <a href="#upload-hint">Выбрать файл повторно ↑</a>
+            </article>{/each}
+          <a href={`/dashboard/galleries/${data.gallery.id}`} data-sveltekit-reload
+            >Обновить состояния загрузок</a
+          >
+        </section>
+      {/if}
+      {#if data.deletingPhotos.length}<form
+          method="POST"
+          action="?/removePhotos"
+          use:enhance={submit}
+          class="feedback"
+        >
+          <p>
+            Удаление не завершено: {data.deletingPhotos.map((p) => p.filename).join(', ')}. Место
+            освободится после удаления файлов.
+          </p>
+          {#each data.deletingPhotos as photo}<input
+              type="hidden"
+              name="selected"
+              value={photo.id}
+            />{/each}
+          <input type="hidden" name="confirmPhotos" value="yes" /><button disabled={locked}
+            >Повторить удаление фотографий</button
+          >
+        </form>{/if}
+      {#if data.photos.length}<DownloadArchive
+          href={`/api/galleries/${data.gallery.id}/archive`}
+          count={data.photos.length}
+          bytes={data.photos.reduce((n, p) => n + p.size, 0)}
+        />{/if}
+      {#if data.gallery.status === 'draft' && data.photos.length}
+        <form
+          method="POST"
+          id="selected-photos"
+          action="?/moveMany"
+          use:enhance={submit}
+          class="publish-panel"
+        >
+          <p>Выбрано: {selected.length}</p>
+          {#if mounted}<button
+              type="button"
+              disabled={locked}
+              onclick={() => (selected = data.photos.map((p) => p.id))}>Выбрать все</button
+            >
+            <button type="button" disabled={locked} onclick={() => (selected = [])}
+              >Снять выбор</button
+            >{/if}
+          <button name="target" value="start" disabled={locked || (mounted && !selected.length)}
+            >В начало</button
+          >
+          <button name="target" value="end" disabled={locked || (mounted && !selected.length)}
+            >В конец</button
+          >
+          <label
+            ><input type="checkbox" name="confirmPhotos" value="yes" /> Подтверждаю удаление выбранных
+            фотографий</label
+          >
+          <button formaction="?/removePhotos" disabled={locked || (mounted && !selected.length)}
+            >Удалить выбранные</button
+          >
+        </form>
+        <form method="POST" action="?/sort" use:enhance={submit}>
+          <button disabled={locked}>Сортировать по имени</button>
+        </form>
+      {/if}
+      {#if previewProblem}<p class="feedback" role="alert">
+          {previewProblem}
+          <button type="button" onclick={() => grid?.dispatchEvent(new Event('retry-previews'))}
+            >Обновить превью</button
+          >
+        </p>{/if}
+      <div
+        class="photo-grid editor-grid"
+        bind:this={grid}
+        data-downloads="true"
+        data-refreshable="true"
+        use:photoViewer
+        use:refreshPreviews={{
+          href: `/dashboard/galleries/${data.gallery.id}/previews?limit=10000`,
+          onStatus: (message) => (previewProblem = message),
+        }}
+      >
         {#each data.photos as photo, i (photo.id)}<article class="photo-item">
+            {#if data.gallery.status === 'draft'}<label
+                ><input
+                  type="checkbox"
+                  form="selected-photos"
+                  name="selected"
+                  value={photo.id}
+                  bind:group={selected}
+                  disabled={locked}
+                />
+                Выбрать {photo.filename}</label
+              >{/if}
             <a
               class="photo-preview"
               href={photo.url}
               target="_blank"
               rel="noreferrer"
+              data-photo-id={photo.id}
               data-filename={photo.filename}
               data-download={`/api/galleries/${data.gallery.id}/photos/${photo.id}/download`}
               data-pswp-width={photo.width}
               data-pswp-height={photo.height}
               aria-label={`Посмотреть ${photo.filename}`}
               ><img
-                src={photo.url}
+                src={photo.thumbnailUrl}
                 alt={photo.filename}
                 width={photo.width}
                 height={photo.height}

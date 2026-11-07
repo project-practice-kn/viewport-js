@@ -28,6 +28,9 @@
   <section class="login-panel">
     <p class="eyebrow">КАБИНЕТ ФОТОГРАФА</p>
     <h2>{register ? 'Создать аккаунт' : 'С возвращением'}</h2>
+    {#if data.reset}<p class="feedback" role="status">
+        Пароль обновлён. Войдите с новым паролем.
+      </p>{/if}
     {#if form?.message}<p class="feedback error" role="alert">{form.message}</p>{/if}
     <form
       method="POST"
@@ -123,6 +126,7 @@
         >
         <p id="invite-hint" class="muted">Для регистрации нужен код от организатора демо.</p>{/if}
       <input type="hidden" name="mode" value={register ? 'register' : 'login'} />
+      <input type="hidden" name="returnTo" value={data.returnTo} />
       <button class="primary" disabled={submitting}
         >{submitting
           ? register
@@ -132,9 +136,12 @@
             ? 'Зарегистрироваться'
             : 'Войти'} <span aria-hidden="true">↗</span></button
       >
-      <a class="text-button" href={register ? '/login' : '/login?mode=register'}
+      <a
+        class="text-button"
+        href={`${register ? '/login?' : '/login?mode=register&'}returnTo=${encodeURIComponent(data.returnTo)}`}
         >{register ? 'Уже есть аккаунт? Войти' : 'Впервые здесь? Создать аккаунт'}</a
       >
+      {#if !register}<a class="text-button" href="/recover">Забыли пароль?</a>{/if}
     </form>
   </section>
 </div>
