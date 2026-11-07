@@ -14,7 +14,7 @@
   let problem = $state<'network' | 'image' | 'unavailable' | 'changed' | null>(null);
   let refreshing = $state(false);
   let grid = $state<HTMLDivElement>();
-  let cover = $derived(data.cover);
+  let cover = $state(untrack(() => data.cover));
   let lastRefresh = Date.now();
   const retriedImages = new Set<string>();
   const failedImages = new Map<string, HTMLImageElement>();
@@ -30,6 +30,7 @@
       urls = {};
       thumbnails = {};
       photos = [...data.photos];
+      cover = data.cover;
       coverUrl = data.cover?.url ?? '';
       problem = null;
       retriedImages.clear();
@@ -114,14 +115,14 @@
       if (disposed || token !== data.token) return;
       if (
         refreshed.length !== photos.length ||
-        refreshed.some((photo, i) => photo.id !== photos[i].id) ||
-        refreshedCover?.id !== cover?.id
+        refreshed.some((photo, i) => photo.id !== photos[i].id)
       ) {
         problem = 'changed';
         return;
       }
       urls = Object.fromEntries(refreshed.map((photo) => [photo.id, photo.url]));
       thumbnails = Object.fromEntries(refreshed.map((photo) => [photo.id, photo.thumbnailUrl]));
+      cover = refreshedCover;
       coverUrl = refreshedCover?.url ?? '';
       lastRefresh = Date.now();
       problem = null;
@@ -247,17 +248,15 @@
         <button type="button" onclick={retry} disabled={refreshing}>Попробовать снова</button>
       </div>
     {/if}
-    {#if cover}<img
+    {#if cover}{@const coverId = cover.id}<img
         class="story-cover"
         src={coverUrl}
         alt={`Обложка: ${cover.filename}`}
         width={cover.width}
         height={cover.height}
         fetchpriority="high"
-        onerror={(event) =>
-          imageError(`cover:${cover.id}`, event.currentTarget as HTMLImageElement)}
-        onload={(event) =>
-          imageLoaded(`cover:${cover.id}`, event.currentTarget as HTMLImageElement)}
+        onerror={(event) => imageError(`cover:${coverId}`, event.currentTarget as HTMLImageElement)}
+        onload={(event) => imageLoaded(`cover:${coverId}`, event.currentTarget as HTMLImageElement)}
       />{/if}
     <div
       class="photo-grid public-grid"

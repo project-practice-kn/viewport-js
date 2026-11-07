@@ -3,7 +3,7 @@
   import { formatBytes, formatPhotos } from '#lib/format.ts';
   let { href, count, bytes }: { href: string; count: number; bytes: number } = $props();
   let mounted = $state(false),
-    message = $state(''),
+    errorMessage = $state(''),
     frame = $state<HTMLIFrameElement>();
   onMount(() => {
     mounted = true;
@@ -13,7 +13,7 @@
         event.source === frame?.contentWindow &&
         event.data?.type === 'viewport-download-error'
       )
-        message = event.data.message;
+        errorMessage = event.data.message;
     };
     window.addEventListener('message', receive);
     return () => window.removeEventListener('message', receive);
@@ -21,7 +21,7 @@
   function download(event: MouseEvent) {
     if (!mounted || !frame) return;
     event.preventDefault();
-    message = 'Скачивание запрошено. Ход передачи отображается в загрузках браузера.';
+    errorMessage = '';
     frame.src = `${href}?embedded=1&attempt=${Date.now()}`;
   }
 </script>
@@ -29,15 +29,6 @@
 <div class="archive-panel">
   <p class="muted">{formatPhotos(count)} · ZIP примерно {formatBytes(bytes)}</p>
   <a class="download-link" {href} onclick={download}>Скачать все фотографии ZIP ↓</a>
-  {#if message}<p role="status">{message}</p>
-    <button
-      type="button"
-      onclick={() => {
-        if (frame) {
-          frame.src = `${href}?embedded=1&attempt=${Date.now()}`;
-          message = 'Повторяем запрос скачивания…';
-        }
-      }}>Повторить скачивание</button
-    >{/if}
+  {#if errorMessage}<p role="alert">{errorMessage}</p>{/if}
   <iframe bind:this={frame} title="Скачивание архива" hidden></iframe>
 </div>

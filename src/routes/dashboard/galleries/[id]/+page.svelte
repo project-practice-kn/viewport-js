@@ -78,7 +78,7 @@
 <a class="back-link" href="/dashboard">← Все галереи</a>
 <div class="page-heading">
   <div>
-    <p class="eyebrow">
+    <p class="editor-status">
       {data.gallery.status === 'draft' ? 'ЧЕРНОВИК / РЕДАКТОР' : 'ОПУБЛИКОВАНА'}
     </p>
     <h1>{data.gallery.title}</h1>
@@ -102,7 +102,7 @@
   </p>
 {:else}
   <div class="editor-layout">
-    <aside id="gallery-settings">
+    <aside id="gallery-settings" class="settings-panel">
       <h2>Детали истории</h2>
       <form method="POST" action="?/save" aria-busy={pending === '?/save'} use:enhance={submit}>
         <fieldset disabled={data.gallery.status === 'published' || locked}>
@@ -131,22 +131,33 @@
             'не выбрана'}
         </p>
         {#if data.gallery.status === 'published'}<p>
-            Галерея доступна клиенту по ссылке. Чтобы изменить её, снимите публикацию.
+            Галерея доступна клиенту по ссылке. Обложку можно менять ниже; для остальных изменений
+            снимите публикацию.
           </p>
           <a class="public-link" href={data.gallery.link!} target="_blank" rel="noreferrer"
             >Открыть галерею <span class="visually-hidden">в новой вкладке</span>↗</a
           >
           <ShareLink href={data.gallery.link!} />
-          <form method="POST" action="?/rotateLink" use:enhance={submit}>
-            <p class="muted">
-              Старая ссылка перестанет открывать галерею. Уже выданные ссылки на файлы действуют до
-              120 секунд; начатый архив продолжит скачивание.
-            </p>
-            <label
-              ><input type="checkbox" name="confirmLink" value="yes" required /> Подтверждаю смену ссылки</label
+          <details class="link-settings">
+            <summary>Изменить ссылку доступа</summary>
+            <form
+              method="POST"
+              action="?/rotateLink"
+              use:enhance={submit}
+              aria-busy={pending === '?/rotateLink'}
             >
-            <button disabled={locked}>Сменить ссылку</button>
-          </form>
+              <p class="muted">
+                Старая ссылка перестанет открывать галерею. Уже выданные ссылки на файлы действуют
+                до 120 секунд; начатый архив продолжит скачивание.
+              </p>
+              <label
+                ><input type="checkbox" name="confirmLink" value="yes" required /> Подтверждаю смену ссылки</label
+              >
+              <button disabled={locked}
+                >{pending === '?/rotateLink' ? 'Меняем ссылку…' : 'Сменить ссылку'}</button
+              >
+            </form>
+          </details>
           <form
             method="POST"
             action="?/unpublish"
@@ -272,7 +283,7 @@
           id="selected-photos"
           action="?/moveMany"
           use:enhance={submit}
-          class="publish-panel"
+          class="selection-toolbar"
         >
           <p>Выбрано: {selected.length}</p>
           {#if mounted}<button
@@ -300,6 +311,11 @@
         <form method="POST" action="?/sort" use:enhance={submit}>
           <button disabled={locked}>Сортировать по имени</button>
         </form>
+      {/if}
+      {#if data.photos.length}
+        <p class="photo-cover-hint" id="photo-cover-hint">
+          Обложку можно менять в любой момент — порядок фотографий и ссылка для клиента сохранятся.
+        </p>
       {/if}
       {#if previewProblem}<p class="feedback" role="alert">
           {previewProblem}
@@ -347,25 +363,54 @@
                 width={photo.width}
                 height={photo.height}
                 loading="lazy"
-              /></a
+              />{#if photo.id === data.gallery.coverId}<span class="photo-cover-badge">Обложка</span
+                >{/if}</a
             >
             <div class="photo-caption">
-              <span>{photo.filename}</span>{#if photo.id === data.gallery.coverId}<span
-                  class="badge">Обложка</span
-                >{/if}
+              <span>{photo.filename}</span>
+              <a
+                class="photo-download"
+                href={`/api/galleries/${data.gallery.id}/photos/${photo.id}/download`}
+                aria-label={`Скачать оригинал ${photo.filename}`}
+                title="Скачать оригинал"
+              >
+                <svg
+                  width="20"
+                  height="20"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.7"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  aria-hidden="true"
+                >
+                  <path d="M12 3v12m-5-5 5 5 5-5M4 16v4a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-4" />
+                </svg>
+              </a>
             </div>
-            <a
-              class="download-link"
-              href={`/api/galleries/${data.gallery.id}/photos/${photo.id}/download`}
-              aria-label={`Скачать оригинал ${photo.filename}`}>Скачать оригинал ↓</a
-            >
-            {#if data.gallery.status === 'draft'}<div class="photo-actions">
-                <form method="POST" action="?/cover" use:enhance={submit}>
-                  <input type="hidden" name="photoId" value={photo.id} /><button
-                    disabled={locked || photo.id === data.gallery.coverId}>На обложку</button
-                  >
-                </form>
-                <form method="POST" action="?/move" class="reorder-actions" use:enhance={submit}>
+            <div class="photo-actions">
+              <form
+                method="POST"
+                action="?/cover"
+                use:enhance={submit}
+                aria-busy={pending === '?/cover'}
+              >
+                <input type="hidden" name="photoId" value={photo.id} /><button
+                  disabled={locked || photo.id === data.gallery.coverId}
+                  aria-describedby="photo-cover-hint"
+                  aria-label={`Сделать обложкой ${photo.filename}`}
+                  >{photo.id === data.gallery.coverId
+                    ? 'Обложка выбрана'
+                    : 'Сделать обложкой'}</button
+                >
+              </form>
+              {#if data.gallery.status === 'draft'}<form
+                  method="POST"
+                  action="?/move"
+                  class="reorder-actions"
+                  use:enhance={submit}
+                >
                   <input type="hidden" name="photoId" value={photo.id} /><button
                     name="direction"
                     value="up"
@@ -378,7 +423,8 @@
                     aria-label={`Переместить ${photo.filename} позже`}>→</button
                   >
                 </form>
-              </div>{/if}
+              {/if}
+            </div>
           </article>{:else}<p class="empty">
             Пока ни одного снимка.<br />Добавьте фотографии, чтобы оживить историю.
           </p>{/each}
@@ -387,8 +433,8 @@
   </div>
 {/if}
 {#if data.gallery.status === 'draft'}
-  <section class="publish-panel" aria-labelledby="delete-heading">
-    <h2 id="delete-heading">Удаление галереи</h2>
+  <details class="danger-panel" open={data.gallery.deleting}>
+    <summary id="delete-heading">Удаление галереи</summary>
     <p>Галерея и все её фотографии будут удалены без возможности восстановления.</p>
     <form method="POST" action="?/delete" use:enhance={submit} aria-busy={pending === '?/delete'}>
       <label
@@ -403,5 +449,5 @@
             : 'Удалить галерею'}</button
       >
     </form>
-  </section>
+  </details>
 {/if}
