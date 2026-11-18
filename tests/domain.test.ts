@@ -125,6 +125,14 @@ test('Lifecycle, обложка, точный порядок, защита publi
     sql.prepare("update upload_reservations set status='completed' where photo_id=?").run(p.id);
   }
   assert.throws(() => service.cover('owner', id, 'foreign'), httpError(400));
+  const orderBeforeCover = service.readyPhotos(id).map((p) => ({ id: p.id, position: p.position }));
+  service.cover('owner', id, batch[1].id);
+  assert.equal(service.owned('owner', id).coverId, batch[1].id);
+  assert.deepEqual(
+    service.readyPhotos(id).map((p) => ({ id: p.id, position: p.position })),
+    orderBeforeCover,
+    'Выбор второго снимка обложкой не меняет порядок и позиции',
+  );
   service.cover('owner', id, batch[0].id);
   assert.throws(() => service.reorder('owner', id, [batch[0].id]), httpError(400));
   assert.throws(() => service.reorder('owner', id, [batch[0].id, batch[0].id]), httpError(400));
@@ -135,7 +143,35 @@ test('Lifecycle, обложка, точный порядок, защита publi
   assert.equal(service.publish('owner', id), token);
   assert.equal(service.publicGallery(token).id, id);
   assert.throws(() => service.edit('owner', id, form('blocked')), httpError(409));
+  const publishedOrder = service.readyPhotos(id).map((p) => ({ id: p.id, position: p.position }));
+  assert.throws(() => service.cover('other', id, batch[1].id), httpError(404));
+  assert.throws(() => service.cover('owner', id, 'foreign'), httpError(400));
+  sql.prepare('update photos set deleting=1 where id=?').run(batch[0].id);
+  assert.throws(() => service.cover('owner', id, batch[0].id), httpError(400));
+  sql.prepare('update photos set deleting=0 where id=?').run(batch[0].id);
+  sql.prepare("update photos set status='pending' where id=?").run(batch[0].id);
+  assert.throws(() => service.cover('owner', id, batch[0].id), httpError(400));
+  sql.prepare("update photos set status='ready' where id=?").run(batch[0].id);
+  sql.prepare('update galleries set deleting=1 where id=?').run(id);
   assert.throws(() => service.cover('owner', id, batch[1].id), httpError(409));
+  sql.prepare('update galleries set deleting=0 where id=?').run(id);
+  service.cover('owner', id, batch[1].id);
+  assert.equal(service.publicGallery(token).coverId, batch[1].id);
+  assert.equal(service.publicGallery(token).status, 'published');
+  assert.equal(service.owned('owner', id).token, token);
+  assert.deepEqual(
+    service.readyPhotos(id).map((p) => ({ id: p.id, position: p.position })),
+    publishedOrder,
+  );
+  assert.throws(
+    () =>
+      service.reorder(
+        'owner',
+        id,
+        batch.map((p) => p.id),
+      ),
+    httpError(409),
+  );
   assert.throws(
     () => uploads.reserve('owner', id, [{ name: 'x.png', size: 1, type: 'image/png' }]),
     httpError(409),

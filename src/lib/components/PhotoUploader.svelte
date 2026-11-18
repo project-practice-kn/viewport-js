@@ -228,7 +228,7 @@
 </script>
 
 <section class="upload-area" aria-label="Загрузка фотографий">
-  <p class="eyebrow">ДОБАВИТЬ ФОТОГРАФИИ</p>
+  <h2>Добавить фотографии</h2>
   <p class="muted">
     Свободно {formatBytes(free)} из {formatBytes(usage.quota)} · зарезервировано {formatBytes(
       usage.reserved,

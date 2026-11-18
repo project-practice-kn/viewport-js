@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { PageProps } from './$types';
   import { enhance } from '$app/forms';
-  import { formatBytes } from '#lib/format.ts';
+  import { formatBytes, formatPhotos } from '#lib/format.ts';
   import ShareLink from '#lib/components/ShareLink.svelte';
   import { onMount } from 'svelte';
   let { data, form }: PageProps = $props();
@@ -16,10 +16,10 @@
 <svelte:head><title>Галереи · Viewport</title></svelte:head>
 <div class="page-heading">
   <div>
-    <p class="eyebrow">КАБИНЕТ / {data.user.name}</p>
+    <p class="account-name">Кабинет фотографа · {data.user.name}</p>
     <h1>Ваши галереи<span class="accent">.</span></h1>
   </div>
-  <div>
+  <div class="account-actions">
     <a href="/dashboard/account">Настройки аккаунта</a>
     <form method="POST" action="/logout"><button>Выйти</button></form>
   </div>
@@ -82,60 +82,81 @@
   </div>
   <form method="GET" class="gallery-filters">
     <label
-      >Поиск по названию<input type="search" name="q" value={data.query} maxlength="120" /></label
+      >Поиск по названию<input
+        type="search"
+        placeholder="Название галереи…"
+        name="q"
+        value={data.query}
+        maxlength="120"
+      /></label
     >
-    <label for="gallery-status">Статус</label><select
-      id="gallery-status"
-      name="status"
-      value={data.status}
-      ><option value="">Все галереи</option><option value="draft">Черновики</option><option
-        value="published">Опубликованные</option
-      ></select
+    <label for="gallery-status"
+      >Статус<select id="gallery-status" name="status" value={data.status}
+        ><option value="">Все галереи</option><option value="draft">Черновики</option><option
+          value="published">Опубликованные</option
+        ></select
+      ></label
     >
-    <label for="gallery-sort">Сортировать</label><select
-      id="gallery-sort"
-      name="sort"
-      value={data.sort}
+    <label for="gallery-sort"
+      >Сортировать<select id="gallery-sort" name="sort" value={data.sort}>
+        <option value="date">По дате изменения</option><option value="name">По названию</option
+        ><option value="size">По размеру</option>
+      </select></label
     >
-      <option value="date">По дате изменения</option><option value="name">По названию</option
-      ><option value="size">По размеру</option>
-    </select>
     <button>Найти</button><a href="/dashboard">Сбросить</a>
   </form>
-  {#each data.galleries as gallery, i}<article class="gallery-card">
-      <a class="gallery-row" href={`/dashboard/galleries/${gallery.id}`}
-        >{#if gallery.coverUrl}<img
-            class="dashboard-cover"
-            src={gallery.coverUrl}
-            alt=""
-            width="96"
-            height="72"
-            loading="lazy"
-          />{:else}<span class="dashboard-cover dashboard-cover-empty" aria-hidden="true"
-            >{String(i + 1).padStart(2, '0')}</span
-          >{/if}
-        <h2>{gallery.title}</h2>
-        <span class="badge" class:published={gallery.status === 'published'}
-          >{gallery.deleting
-            ? 'Удаление не завершено'
-            : gallery.status === 'draft'
-              ? 'Черновик'
-              : 'Опубликована'}</span
-        ><span aria-hidden="true">↗</span></a
-      >
-      <p class="muted">
-        Фотографий: {gallery.photoCount} · Размер: {formatBytes(gallery.photoBytes)} · Изменена:
-        <time datetime={new Date(gallery.updatedAt).toISOString()}
-          >{localDates
-            ? new Date(gallery.updatedAt).toLocaleString('ru-RU')
-            : `${new Date(gallery.updatedAt).toLocaleString('ru-RU', { timeZone: 'UTC' })} UTC`}</time
+  <div class="gallery-tiles">
+    {#each data.galleries as gallery}<article class="gallery-tile">
+        <a
+          class="gallery-tile-cover"
+          href={`/dashboard/galleries/${gallery.id}`}
+          aria-label={`Открыть галерею «${gallery.title}»`}
         >
-      </p>
-      {#if gallery.link}<a href={gallery.link} target="_blank" rel="noreferrer"
-          >Открыть для клиента ↗</a
-        ><ShareLink href={gallery.link} />{/if}
-    </article>{:else}<p class="empty">
-      {#if data.query || data.status}Галереи не найдены. Измените условия поиска.{:else}Здесь
-        начнётся ваша первая история.<br />Создайте галерею и добавьте фотографии.{/if}
-    </p>{/each}
+          {#if gallery.coverUrl}<img
+              src={gallery.coverUrl}
+              alt=""
+              width="720"
+              height="480"
+              loading="lazy"
+            />
+          {:else}<div class="gallery-tile-empty">
+              <span class="empty-cover-mark" aria-hidden="true"></span><span
+                >Добавьте первые фотографии</span
+              >
+            </div>{/if}
+          <span class="badge" class:published={gallery.status === 'published'}
+            >{gallery.deleting
+              ? 'Удаление не завершено'
+              : gallery.status === 'draft'
+                ? 'Черновик'
+                : 'Опубликована'}</span
+          >
+          <span class="gallery-tile-arrow" aria-hidden="true">↗</span>
+        </a>
+        <div class="gallery-tile-caption">
+          <h2><a href={`/dashboard/galleries/${gallery.id}`}>{gallery.title}</a></h2>
+          <p class="muted">
+            {formatPhotos(gallery.photoCount)} · {formatBytes(gallery.photoBytes)}
+          </p>
+          <time
+            class="gallery-tile-date"
+            datetime={new Date(gallery.updatedAt).toISOString()}
+            title="Дата изменения"
+          >
+            {localDates
+              ? new Date(gallery.updatedAt).toLocaleDateString('ru-RU')
+              : `${new Date(gallery.updatedAt).toLocaleDateString('ru-RU', { timeZone: 'UTC' })} UTC`}
+          </time>
+        </div>
+        {#if gallery.link}<div class="gallery-tile-actions">
+            <a href={gallery.link} target="_blank" rel="noreferrer">Для клиента ↗</a><ShareLink
+              href={gallery.link}
+              compact
+            />
+          </div>{/if}
+      </article>{:else}<p class="empty">
+        {#if data.query || data.status}Галереи не найдены. Измените условия поиска.{:else}Здесь
+          начнётся ваша первая история.<br />Создайте галерею и добавьте фотографии.{/if}
+      </p>{/each}
+  </div>
 </section>

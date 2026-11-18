@@ -201,20 +201,18 @@ async function signedPhotoPage(
 export function publicPhotoPage(token: string, search: URLSearchParams) {
   const gallery = publicGallery(token);
   return signedPhotoPage(gallery.id, gallery.coverId, photoPageOptions(search, 96), () => {
-    const current = publicGallery(token);
-    if (current.coverId !== gallery.coverId) error(409, 'Состав галереи изменился');
+    publicGallery(token);
   });
 }
 export function ownedPhotoPage(userId: string, id: string, search: URLSearchParams) {
   const gallery = owned(userId, id);
   return signedPhotoPage(id, gallery.coverId, photoPageOptions(search, 10000), () => {
-    const current = owned(userId, id);
-    if (current.coverId !== gallery.coverId) error(409, 'Состав галереи изменился');
+    owned(userId, id);
   });
 }
 export function cover(userId: string, id: string, photoId: string) {
   atomic(() => {
-    owned(userId, id, true);
+    owned(userId, id);
     if (!readyPhotos(id).some((p) => p.id === photoId))
       error(400, 'Выберите готовую фотографию этой галереи');
     db()
